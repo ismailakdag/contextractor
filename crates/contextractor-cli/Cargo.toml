@@ -1,0 +1,11 @@
+[package]
+name = "contextractor-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+contextractor-core = { path = "../contextractor-core" }
+serde_json.workspace = true
+

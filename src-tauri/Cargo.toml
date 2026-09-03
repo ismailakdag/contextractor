@@ -1,0 +1,19 @@
+[package]
+name = "contextractor-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "contextractor_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+contextractor-core = { path = "../crates/contextractor-core" }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "=2.11.5", features = [] }
+tauri-plugin-dialog = "=2.7.3"
