@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppInfo,
@@ -16,7 +16,10 @@ import type {
 } from "./types";
 import { demoDetail, demoDiscovery, demoSessions } from "./demo";
 
-export const isDesktop = "__TAURI_INTERNALS__" in window;
+export const isDesktop =
+  isTauri()
+  || "__TAURI_INTERNALS__" in window
+  || window.location.hostname === "tauri.localhost";
 
 export async function getAppInfo(): Promise<AppInfo> {
   if (!isDesktop) {

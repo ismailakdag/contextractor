@@ -13,9 +13,7 @@ export const demoSessions: SessionListItem[] = [
   {
     id: "session-1",
     provider: "codex",
-    title: "Design a local context archive for every AI desktop app",
-    project_path: "C:\\Projects\\contextractor",
-    source_path: "C:\\Users\\ismai\\.codex\\sessions\\2026\\09\\04\\rollout-demo.jsonl",
+    title: "Örnek · Proje planını hazırla",
     created_at: "2026-09-02T15:30:22Z",
     updated_at: "2026-09-02T16:47:04Z",
     model: "gpt-5.6-sol",
@@ -27,9 +25,7 @@ export const demoSessions: SessionListItem[] = [
   {
     id: "session-2",
     provider: "claude",
-    title: "Trace a regression across the ingestion pipeline",
-    project_path: "C:\\Projects\\millennium-leaf",
-    source_path: "C:\\Users\\ismai\\.claude\\projects\\millennium-leaf\\session.jsonl",
+    title: "Örnek · Toplantı notlarını özetle",
     created_at: "2026-08-29T09:11:00Z",
     updated_at: "2026-08-29T10:02:18Z",
     model: "claude-opus-4.7",
@@ -41,9 +37,7 @@ export const demoSessions: SessionListItem[] = [
   {
     id: "session-3",
     provider: "antigravity",
-    title: "Build and verify the RFID analysis workspace",
-    project_path: "E:\\RFID\\analysis",
-    source_path: "C:\\Users\\ismai\\.grok\\sessions\\E%3A%5CRFID%5Canalysis\\demo\\chat_history.jsonl",
+    title: "Örnek · Veri aktarımını gözden geçir",
     created_at: "2026-08-24T12:40:00Z",
     updated_at: "2026-08-24T15:16:10Z",
     model: "gemini-3.7-flash",
@@ -54,9 +48,7 @@ export const demoSessions: SessionListItem[] = [
   {
     id: "session-4",
     provider: "grok",
-    title: "Review the portable packaging strategy",
-    project_path: "C:\\Projects\\desktop-tools",
-    source_path: "C:\\Users\\ismai\\.gemini\\antigravity-cli\\brain\\demo\\.system_generated\\logs\\transcript_full.jsonl",
+    title: "Örnek · Yayın kontrol listesi oluştur",
     created_at: "2026-08-21T18:04:00Z",
     updated_at: "2026-08-21T18:51:38Z",
     model: "grok-4.6",
@@ -72,7 +64,7 @@ const turns: Turn[] = [
     ordinal: 0,
     role: "user",
     created_at: "2026-09-02T15:30:22Z",
-    text: "Claude, Grok, Codex ve Antigravity gibi AI uygulamalarındaki yerel sessionları tek yerde tarayıp inceleyebileceğim cross-platform bir masaüstü uygulaması tasarla.",
+    text: "Bir ürün güncellemesi için kısa ve uygulanabilir bir yayın kontrol listesi hazırla.",
     event_type: "message",
     tool_calls: [],
   },
@@ -80,7 +72,7 @@ const turns: Turn[] = [
     ordinal: 1,
     role: "assistant",
     created_at: "2026-09-02T15:31:08Z",
-    text: "Yerel session formatlarını sağlayıcı adaptörleriyle normalize eden, kaynaklara yazmayan bir arşiv oluşturabiliriz. İlk sürüm Codex, Claude Code, Grok CLI ve Antigravity/AGY kaynaklarını otomatik keşfedecek.",
+    text: "Kontrol listesini hazırlık, doğrulama ve yayın sonrası takip olmak üzere üç bölüme ayıracağım.",
     event_type: "message",
     model: "gpt-5.6-sol",
     usage: {
@@ -104,9 +96,9 @@ const turns: Turn[] = [
     tool_calls: [
       {
         external_id: "call-01",
-        name: "discover_local_sources",
-        arguments_json: '{"providers":["codex","claude","grok","antigravity"]}',
-        result_text: "4 providers detected · 86 canonical session files",
+        name: "check_project_status",
+        arguments_json: '{"scope":"current_project"}',
+        result_text: "Project status checked successfully",
         status: "completed",
         duration_ms: 742,
       },
@@ -116,7 +108,7 @@ const turns: Turn[] = [
     ordinal: 3,
     role: "assistant",
     created_at: "2026-09-02T15:33:40Z",
-    text: "Tarama sonucunda dört zengin yerel kaynak doğrulandı. Token kullanımı kaydedilmişse observed, transcript üzerinden yeniden kurulmuşsa reconstructed, yalnızca metinden hesaplanmışsa estimated olarak etiketlenecek.",
+    text: "Kontrol listesi hazır: sürüm notlarını doğrula, testleri çalıştır, paketi üret ve yayın sonrası temel kontrolleri tamamla.",
     event_type: "message",
     model: "gpt-5.6-sol",
     tool_calls: [],
@@ -130,7 +122,7 @@ export const demoDetail: Record<string, SessionDetail> = Object.fromEntries(
       data: {
         session,
         summary:
-          "Dört yerel AI sağlayıcısını ortak bir veri modeline aktaran, salt-okunur ve taşınabilir masaüstü arşivi tasarlandı.",
+          "Örnek bir ürün güncellemesi için hazırlık, doğrulama ve takip adımları çıkarıldı.",
         turns,
       },
       cost: {
