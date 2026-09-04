@@ -855,7 +855,7 @@ impl Archive {
             }
         }
 
-        let mut seen = std::collections::HashMap::new();
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let mut paths = Vec::new();
         for (text, origin) in texts {
             for path in extract_file_paths(&text) {
@@ -887,6 +887,71 @@ impl Archive {
                 if paths.len() >= 100 {
                     return Ok(paths);
                 }
+            }
+        }
+        Ok(paths)
+    }
+
+    /// Export packages intentionally include only explicit @ mentions and
+    /// actual attachment metadata, never incidental project/tool paths.
+    pub fn session_export_file_references(
+        &self,
+        session_id: &str,
+    ) -> rusqlite::Result<Vec<FileReference>> {
+        let mut statement = self.connection.prepare(
+            "SELECT role, text, metadata_json FROM turns WHERE session_id=?1 ORDER BY ordinal",
+        )?;
+        let rows = statement.query_map([session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut paths: Vec<FileReference> = Vec::new();
+        for row in rows {
+            let (role, text, metadata) = row?;
+            let origin = match role.as_str() {
+                "user" => "user",
+                "assistant" | "reasoning" => "assistant",
+                _ => continue,
+            };
+            let mut candidates = extract_explicit_file_paths(&text);
+            if let Some(metadata) = metadata {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&metadata) {
+                    if value.get("attachment_type").is_some()
+                        || value.get("filename").is_some()
+                        || value.pointer("/content/file/filePath").is_some()
+                    {
+                        collect_json_paths(&value, &mut candidates);
+                    }
+                }
+            }
+            for path in candidates {
+                let key = path.to_ascii_lowercase();
+                if let Some(index) = seen.get(&key).copied() {
+                    if !paths[index].origins.iter().any(|value| value == origin) {
+                        paths[index].origins.push(origin.to_string());
+                    }
+                    continue;
+                }
+                let file_path = std::path::Path::new(&path);
+                let extension = file_path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                paths.push(FileReference {
+                    exists: file_path.exists(),
+                    is_image: matches!(
+                        extension.as_str(),
+                        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "avif"
+                    ),
+                    path,
+                    origins: vec![origin.to_string()],
+                });
+                seen.insert(key, paths.len() - 1);
             }
         }
         Ok(paths)
@@ -1301,6 +1366,49 @@ fn extract_file_paths(text: &str) -> Vec<String> {
     }
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
         collect_json_paths(&json, &mut paths);
+    }
+    paths
+}
+
+fn extract_explicit_file_paths(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let bytes = text.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let Some(relative) = text[cursor..].find('@') else {
+            break;
+        };
+        let at = cursor + relative;
+        let mut start = at + 1;
+        let quoted = bytes.get(start) == Some(&b'"');
+        if quoted {
+            start += 1;
+        }
+        let tail = &text[start..];
+        let end = if quoted {
+            tail.find('"').unwrap_or(tail.len())
+        } else {
+            tail.find(['\r', '\n', '<', '>', '|']).unwrap_or(tail.len())
+        };
+        if let Some(path) = extract_windows_paths(tail[..end].trim()).into_iter().next() {
+            paths.push(path);
+        }
+        cursor = start + end + usize::from(quoted && start + end < bytes.len());
+    }
+
+    for marker in [
+        "# Files mentioned by the user:",
+        "# Files mentioned by user:",
+    ] {
+        if let Some(start) = text.find(marker) {
+            let attachment_block = &text[start + marker.len()..];
+            let end = attachment_block
+                .find("## My request:")
+                .or_else(|| attachment_block.find("# My request:"))
+                .or_else(|| attachment_block.find("Distinguish instructions"))
+                .unwrap_or(attachment_block.len());
+            paths.extend(extract_windows_paths(&attachment_block[..end]));
+        }
     }
     paths
 }
@@ -1722,5 +1830,13 @@ mod tests {
                 r"E:\Obsidian Vaults\Trace Analysis\system\index.md",
             ]
         );
+    }
+
+    #[test]
+    fn export_paths_only_accept_explicit_mentions_and_attachment_block() {
+        let paths = extract_explicit_file_paths(
+            "Bare E:\\project\\everything should not export.md\n@E:\\picked\\note.md\n# Files mentioned by the user:\n## C:\\Temp\\dragged.pdf\n## My request:\nIgnore E:\\project\\also-not-exported.md",
+        );
+        assert_eq!(paths, vec![r"E:\picked\note.md", r"C:\Temp\dragged.pdf"]);
     }
 }

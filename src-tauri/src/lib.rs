@@ -5,7 +5,6 @@ use contextractor_core::{
     UsageAnalytics,
 };
 use serde::Serialize;
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -196,8 +195,7 @@ async fn get_session_files(
 #[tauri::command]
 async fn collect_session_files(
     id: String,
-    destination: Option<String>,
-    include_workspace: bool,
+    destination: String,
     origin_filter: String,
     state: State<'_, AppState>,
 ) -> Result<FileCollectionReport, String> {
@@ -211,54 +209,23 @@ async fn collect_session_files(
         if !matches!(origin_filter.as_str(), "user" | "assistant" | "all") {
             return Err("Geçersiz dosya paketi kaynağı".into());
         }
-        let references = archive.session_file_references(&id).map_err(error_string)?;
+        let references = archive
+            .session_export_file_references(&id)
+            .map_err(error_string)?;
         let references = references
             .into_iter()
             .filter(|reference| reference_matches_origin(&reference.origins, &origin_filter))
             .collect::<Vec<_>>();
         let selected_references = references.len();
-        let base = destination.map(PathBuf::from).unwrap_or_else(|| {
-            database_path
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join("exports")
-        });
-        fs::create_dir_all(&base).map_err(error_string)?;
+        let base = PathBuf::from(destination);
+        if !base.is_dir() {
+            return Err("Seçilen hedef klasör artık mevcut değil".into());
+        }
         let package = unique_collection_path(&base, &session.title);
         fs::create_dir_all(&package).map_err(error_string)?;
 
         let mut entries = Vec::new();
         let mut counters = CollectionCounters::default();
-        if include_workspace {
-            if let Some(workspace) = session.project_path.as_deref().map(|value| {
-                normalize_requested_path(value).unwrap_or_else(|_| PathBuf::from(value))
-            }) {
-                if workspace.is_dir() {
-                    let leaf = workspace
-                        .file_name()
-                        .unwrap_or_else(|| OsStr::new("workspace"));
-                    let target = package.join("workspace").join(leaf);
-                    copy_tree(
-                        &workspace,
-                        &target,
-                        &package,
-                        &mut counters,
-                        &mut entries,
-                        Vec::new(),
-                    );
-                } else {
-                    counters.missing += 1;
-                    entries.push(FileCollectionEntry {
-                        source: workspace.display().to_string(),
-                        destination: None,
-                        status: "missing".into(),
-                        reason: Some("Çalışma alanı artık bu konumda değil".into()),
-                        origins: vec!["workspace".into()],
-                    });
-                }
-            }
-        }
-
         for reference in references {
             let source = normalize_requested_path(&reference.path)
                 .unwrap_or_else(|_| PathBuf::from(&reference.path));
@@ -304,7 +271,7 @@ async fn collect_session_files(
         let report_path = package.join("contextractor-file-report.json");
         let report = serde_json::json!({
             "session": { "id": session.id, "title": session.title, "provider": session.provider },
-            "include_workspace": include_workspace,
+            "include_workspace": false,
             "origin_filter": origin_filter,
             "selected_references": selected_references,
             "copied_files": counters.files,

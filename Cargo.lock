@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "contextractor-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "contextractor-core",
@@ -356,7 +356,7 @@ dependencies = [
 
 [[package]]
 name = "contextractor-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "directories",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "contextractor-desktop"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "contextractor-core",
  "serde",

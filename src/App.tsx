@@ -12,7 +12,6 @@ import {
   Database,
   Download,
   FileText,
-  Files,
   Folder,
   FolderOutput,
   ImageOff,
@@ -1070,7 +1069,6 @@ function ToolRecord({ tool, sessionId, turnOrdinal, toolOrdinal, projectPath }: 
 function EvidencePanel({ cost, session, files, filesLoading, open, onClose, onNotice }: { cost: CostEstimate; session: SessionListItem; files: FileReference[]; filesLoading: boolean; open: boolean; onClose: () => void; onNotice: (message: string) => void }) {
   const confidenceLabel = cost.confidence === "observed" ? "Kaydedilmiş" : cost.confidence === "reconstructed" ? "Yeniden kuruldu" : "Tahmini";
   const [fileFilter, setFileFilter] = useState<"user" | "assistant" | "tool" | "all">("user");
-  const [collectionScope, setCollectionScope] = useState<"references" | "workspace">("references");
   const [collectionOrigin, setCollectionOrigin] = useState<"user" | "assistant" | "all">("user");
   const [collecting, setCollecting] = useState(false);
   const [lastCollection, setLastCollection] = useState<FileCollectionReport | null>(null);
@@ -1090,13 +1088,12 @@ function EvidencePanel({ cost, session, files, filesLoading, open, onClose, onNo
       onNotice(String(error));
     }
   };
-  const collectFiles = async (chooseDestination: boolean) => {
-    setCollecting(true);
+  const collectFiles = async () => {
     try {
-      const selected = chooseDestination ? await openDialog({ directory: true, multiple: false, title: "Dosya paketinin kaydedileceği klasör" }) : null;
-      if (chooseDestination && !selected) return;
-      const destination = typeof selected === "string" ? selected : undefined;
-      const report = await collectSessionFiles(session.id, destination, collectionScope === "workspace", collectionOrigin);
+      const selected = await openDialog({ directory: true, multiple: false, title: "Dosya paketinin kaydedileceği klasör" });
+      if (typeof selected !== "string") return;
+      setCollecting(true);
+      const report = await collectSessionFiles(session.id, selected, collectionOrigin);
       setLastCollection(report);
       onNotice(`${report.copied_files} dosya toplandı · ${report.duplicates} tekrar tekilleştirildi · ${report.missing} eksik`);
     } catch (error) {
@@ -1188,26 +1185,21 @@ function EvidencePanel({ cost, session, files, filesLoading, open, onClose, onNo
       </div>
       <div className="file-collection-section">
         <div className="file-reference-heading"><span>Dosya paketi</span><small>raporlu kopya</small></div>
-        <p>Seçtiğin konuşma kaynaklarını veya çalışma alanını özgün klasör yapısıyla kopyalar. Aynı fiziksel dosya yalnız bir kez alınır; eksikler JSON raporuna yazılır.</p>
+        <p>Yalnızca konuşmada @ ile açıkça belirtilen veya sohbete eklenen dosyaları kopyalar. Aynı fiziksel dosya yalnız bir kez alınır; eksikler JSON raporuna yazılır.</p>
         <div className="file-filter-strip collection-origin-strip" aria-label="Dosya paketine dahil edilecek kaynak">
           {([['user', 'Sen'], ['assistant', 'Asistan'], ['all', 'Tümü']] as const).map(([id, label]) => (
             <button key={id} className={collectionOrigin === id ? "active" : ""} onClick={() => setCollectionOrigin(id)}>{label}<small>{id === "all" ? "Sen + Asistan" : ""}</small></button>
           ))}
         </div>
-        <select value={collectionScope} onChange={(event) => setCollectionScope(event.target.value as "references" | "workspace")}>
-          <option value="references">Yalnız konuşmada geçen dosyalar</option>
-          <option value="workspace" disabled={!session.project_path}>Çalışma alanı + konuşmada geçen dosyalar</option>
-        </select>
         <div className="file-collection-actions">
-          <button className="secondary-button" disabled={collecting} onClick={() => void collectFiles(false)}><Files size={14} /> {collecting ? "Toplanıyor…" : "Exports’a çıkar"}</button>
-          <button className="secondary-button" disabled={collecting} onClick={() => void collectFiles(true)}><FolderOutput size={14} /> Konum seç</button>
+          <button className="secondary-button" disabled={collecting} onClick={() => void collectFiles()}><FolderOutput size={14} /> {collecting ? "Toplanıyor…" : "Topla…"}</button>
         </div>
         {lastCollection && (
           <button className="collection-result" onClick={() => void openFile(lastCollection.destination)} title={lastCollection.destination}>
             <Check size={14} /><span><strong>Son paket hazır</strong><small>{lastCollection.copied_files} dosya · klasörde göster</small></span>
           </button>
         )}
-        <small>En fazla 50.000 dosya / 4 GB; sembolik bağlantılar takip edilmez.</small>
+        <small>“Topla” önce hedef konumu sorar; seçimi iptal edersen hiçbir işlem başlamaz.</small>
       </div>
       <div className="provenance-seal">
         <ShieldCheck size={17} />
