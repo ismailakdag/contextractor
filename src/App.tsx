@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle,
   Archive,
@@ -12,7 +12,9 @@ import {
   Database,
   Download,
   FileText,
+  Files,
   Folder,
+  FolderOutput,
   ImageOff,
   Moon,
   RefreshCw,
@@ -28,6 +30,7 @@ import {
   exportArchive,
   exportSession,
   getAppInfo,
+  collectSessionFiles,
   getSession,
   getSessionFiles,
   getSessionTurns,
@@ -48,10 +51,12 @@ import type {
   CostEstimate,
   DiscoveryReport,
   FileReference,
+  FontId,
   ImportProgress,
   PriceSetting,
   SessionDetail,
   SessionListItem,
+  ThemeId,
   ToolCall,
   Turn,
 } from "./types";
@@ -66,7 +71,6 @@ const providerMeta = {
 type ProviderFilter = keyof typeof providerMeta | "all";
 type ViewMode = "conversation" | "all" | "prompts" | "responses" | "system" | "tools" | "summary";
 type AppMode = "archive" | "usage" | "settings";
-type Theme = "light" | "dark";
 type SessionSort = "newest" | "oldest";
 const PAGE_SIZE = 120;
 
@@ -100,10 +104,14 @@ export default function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [sessionFiles, setSessionFiles] = useState<FileReference[]>([]);
   const [filesLoading, setFilesLoading] = useState(false);
-  const [theme, setTheme] = useState<Theme>(() => {
+  const [theme, setTheme] = useState<ThemeId>(() => {
     const saved = localStorage.getItem("contextractor-theme");
-    if (saved === "light" || saved === "dark") return saved;
+    if (saved === "light" || saved === "dark" || saved === "graphite" || saved === "sepia") return saved;
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
+  const [fontFamily, setFontFamily] = useState<FontId>(() => {
+    const saved = localStorage.getItem("contextractor-font-family");
+    return saved === "manrope" || saved === "source-serif" ? saved : "archivo";
   });
   const [fontScale, setFontScale] = useState(() => Number(localStorage.getItem("contextractor-font-scale")) || 1);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -113,6 +121,11 @@ export default function App() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("contextractor-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    document.documentElement.dataset.font = fontFamily;
+    localStorage.setItem("contextractor-font-family", fontFamily);
+  }, [fontFamily]);
 
   useEffect(() => localStorage.setItem("contextractor-font-scale", String(fontScale)), [fontScale]);
 
@@ -382,9 +395,9 @@ export default function App() {
           </div>
           <button
             className="theme-button"
-            onClick={() => setTheme((current) => current === "light" ? "dark" : "light")}
-            aria-label={theme === "light" ? "Koyu temaya geç" : "Açık temaya geç"}
-            title={theme === "light" ? "Koyu tema" : "Açık tema"}
+            onClick={() => setTheme((current) => current === "light" ? "dark" : current === "dark" ? "graphite" : current === "graphite" ? "sepia" : "light")}
+            aria-label="Temayı değiştir"
+            title="Temayı değiştir"
           >
             {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
           </button>
@@ -455,7 +468,15 @@ export default function App() {
             }}
           />
         ) : (
-          <SettingsView prices={prices} sessions={allSessions} onChange={changePrices} />
+          <SettingsView
+            prices={prices}
+            sessions={allSessions}
+            onChange={changePrices}
+            theme={theme}
+            fontFamily={fontFamily}
+            onThemeChange={setTheme}
+            onFontChange={setFontFamily}
+          />
         )}
       </main>
 
@@ -1047,14 +1068,34 @@ function ToolRecord({ tool, sessionId, turnOrdinal, toolOrdinal, projectPath }: 
 
 function EvidencePanel({ cost, session, files, filesLoading, open, onClose, onNotice }: { cost: CostEstimate; session: SessionListItem; files: FileReference[]; filesLoading: boolean; open: boolean; onClose: () => void; onNotice: (message: string) => void }) {
   const confidenceLabel = cost.confidence === "observed" ? "Kaydedilmiş" : cost.confidence === "reconstructed" ? "Yeniden kuruldu" : "Tahmini";
-  const userFiles = files.filter((file) => file.origins.includes("user"));
-  const modelFiles = files.filter((file) => !file.origins.includes("user"));
+  const [fileFilter, setFileFilter] = useState<"user" | "assistant" | "tool" | "all">("user");
+  const [collectionScope, setCollectionScope] = useState<"references" | "workspace">("references");
+  const [collecting, setCollecting] = useState(false);
+  useEffect(() => setFileFilter("user"), [session.id]);
+  const filteredFiles = fileFilter === "all" ? files : files.filter((file) => file.origins.includes(fileFilter));
+  const userFiles = filteredFiles.filter((file) => file.origins.includes("user"));
+  const modelFiles = filteredFiles.filter((file) => !file.origins.includes("user"));
   const openFile = async (path: string) => {
     try {
       const opened = await revealPath(path);
       if (opened !== path) onNotice(`Açıldı · ${opened}`);
     } catch (error) {
       onNotice(String(error));
+    }
+  };
+  const collectFiles = async (chooseDestination: boolean) => {
+    setCollecting(true);
+    try {
+      const selected = chooseDestination ? await openDialog({ directory: true, multiple: false, title: "Dosya paketinin kaydedileceği klasör" }) : null;
+      if (chooseDestination && !selected) return;
+      const destination = typeof selected === "string" ? selected : undefined;
+      const report = await collectSessionFiles(session.id, destination, collectionScope === "workspace");
+      onNotice(`${report.copied_files} dosya toplandı · ${report.missing} eksik · ${report.skipped} atlandı`);
+      await revealPath(report.destination);
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCollecting(false);
     }
   };
   return (
@@ -1114,18 +1155,42 @@ function EvidencePanel({ cost, session, files, filesLoading, open, onClose, onNo
       <div className="file-reference-section">
         <div className="file-reference-heading">
           <span>Etiketlenen dosyalar</span>
-          <small>{filesLoading ? "aranıyor" : files.length}</small>
+          <small>{filesLoading ? "aranıyor" : `${filteredFiles.length}/${files.length}`}</small>
         </div>
+        {!filesLoading && files.length > 0 && (
+          <div className="file-filter-strip" aria-label="Dosya kaynağı filtresi">
+            {([['user', 'Sen'], ['assistant', 'Asistan'], ['tool', 'Araç'], ['all', 'Tümü']] as const).map(([id, label]) => (
+              <button key={id} className={fileFilter === id ? "active" : ""} onClick={() => setFileFilter(id)}>{label}<small>{id === "all" ? files.length : files.filter((file) => file.origins.includes(id)).length}</small></button>
+            ))}
+          </div>
+        )}
         {filesLoading ? (
           <div className="file-reference-loading">Dosya referansları taranıyor…</div>
-        ) : files.length ? (
+        ) : filteredFiles.length ? (
           <div className="file-reference-groups">
-            <FileReferenceGroup label="Senin etiketlediklerin" files={userFiles} onOpen={openFile} />
-            <FileReferenceGroup label="Model ve araç kayıtları" files={modelFiles} onOpen={openFile} />
+            {fileFilter === "all" ? <>
+              <FileReferenceGroup label="Senin etiketlediklerin" files={userFiles} onOpen={openFile} />
+              <FileReferenceGroup label="Model ve araç kayıtları" files={modelFiles} onOpen={openFile} />
+            </> : (
+              <FileReferenceGroup label={fileFilter === "user" ? "Senin etiketlediklerin" : fileFilter === "assistant" ? "Asistanın etiketledikleri" : "Araç kayıtları"} files={filteredFiles} onOpen={openFile} />
+            )}
           </div>
         ) : (
-          <p className="file-reference-empty">Bu oturumda mutlak dosya referansı bulunamadı.</p>
+          <p className="file-reference-empty">Bu kaynakta dosya referansı bulunamadı.</p>
         )}
+      </div>
+      <div className="file-collection-section">
+        <div className="file-reference-heading"><span>Dosya paketi</span><small>raporlu kopya</small></div>
+        <p>Bulunan referansları veya çalışma alanının tamamını özgün klasör yapısını koruyarak kopyalar; eksikleri JSON raporuna yazar.</p>
+        <select value={collectionScope} onChange={(event) => setCollectionScope(event.target.value as "references" | "workspace")}>
+          <option value="references">Yalnız konuşmada geçen dosyalar</option>
+          <option value="workspace" disabled={!session.project_path}>Çalışma alanı + konuşmada geçen dosyalar</option>
+        </select>
+        <div className="file-collection-actions">
+          <button className="secondary-button" disabled={collecting} onClick={() => void collectFiles(false)}><Files size={14} /> {collecting ? "Toplanıyor…" : "Exports’a çıkar"}</button>
+          <button className="secondary-button" disabled={collecting} onClick={() => void collectFiles(true)}><FolderOutput size={14} /> Konum seç</button>
+        </div>
+        <small>En fazla 50.000 dosya / 4 GB; sembolik bağlantılar takip edilmez.</small>
       </div>
       <div className="provenance-seal">
         <ShieldCheck size={17} />

@@ -5,7 +5,10 @@ use contextractor_core::{
     UsageAnalytics,
 };
 use serde::Serialize;
+use std::ffi::OsStr;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, State};
 
 struct AppState {
@@ -33,6 +36,25 @@ struct UsageCostRow {
     session_id: String,
     provider: String,
     cost: CostEstimate,
+}
+
+#[derive(Serialize)]
+struct FileCollectionReport {
+    destination: String,
+    report_path: String,
+    copied_files: usize,
+    copied_bytes: u64,
+    missing: usize,
+    skipped: usize,
+}
+
+#[derive(Serialize)]
+struct FileCollectionEntry {
+    source: String,
+    destination: Option<String>,
+    status: String,
+    reason: Option<String>,
+    origins: Vec<String>,
 }
 
 fn error_string(error: impl std::fmt::Display) -> String {
@@ -170,6 +192,314 @@ async fn get_session_files(
 }
 
 #[tauri::command]
+async fn collect_session_files(
+    id: String,
+    destination: Option<String>,
+    include_workspace: bool,
+    state: State<'_, AppState>,
+) -> Result<FileCollectionReport, String> {
+    let database_path = state.database_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let archive = Archive::open_existing(&database_path).map_err(error_string)?;
+        let (session, _) = archive
+            .get_session_header(&id)
+            .map_err(error_string)?
+            .ok_or_else(|| "Oturum bulunamadı".to_string())?;
+        let references = archive.session_file_references(&id).map_err(error_string)?;
+        let base = destination.map(PathBuf::from).unwrap_or_else(|| {
+            database_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("exports")
+        });
+        fs::create_dir_all(&base).map_err(error_string)?;
+        let package = unique_collection_path(&base, &session.title);
+        fs::create_dir_all(&package).map_err(error_string)?;
+
+        let mut entries = Vec::new();
+        let mut counters = CollectionCounters::default();
+        if include_workspace {
+            if let Some(workspace) = session.project_path.as_deref().map(|value| {
+                normalize_requested_path(value).unwrap_or_else(|_| PathBuf::from(value))
+            }) {
+                if workspace.is_dir() {
+                    let leaf = workspace
+                        .file_name()
+                        .unwrap_or_else(|| OsStr::new("workspace"));
+                    let target = package.join("workspace").join(leaf);
+                    copy_tree(
+                        &workspace,
+                        &target,
+                        &package,
+                        &mut counters,
+                        &mut entries,
+                        Vec::new(),
+                    );
+                } else {
+                    counters.missing += 1;
+                    entries.push(FileCollectionEntry {
+                        source: workspace.display().to_string(),
+                        destination: None,
+                        status: "missing".into(),
+                        reason: Some("Çalışma alanı artık bu konumda değil".into()),
+                        origins: vec!["workspace".into()],
+                    });
+                }
+            }
+        }
+
+        for reference in references {
+            let source = normalize_requested_path(&reference.path)
+                .unwrap_or_else(|_| PathBuf::from(&reference.path));
+            if !source.exists() {
+                counters.missing += 1;
+                entries.push(FileCollectionEntry {
+                    source: reference.path,
+                    destination: None,
+                    status: "missing".into(),
+                    reason: Some("Dosya veya klasör bulunamadı".into()),
+                    origins: reference.origins,
+                });
+                continue;
+            }
+            let target = package
+                .join("references")
+                .join(portable_source_path(&source));
+            if source.is_dir() {
+                copy_tree(
+                    &source,
+                    &target,
+                    &package,
+                    &mut counters,
+                    &mut entries,
+                    reference.origins,
+                );
+            } else {
+                copy_one(
+                    &source,
+                    &target,
+                    &mut counters,
+                    &mut entries,
+                    reference.origins,
+                );
+            }
+        }
+
+        let report_path = package.join("contextractor-file-report.json");
+        let report = serde_json::json!({
+            "session": { "id": session.id, "title": session.title, "provider": session.provider },
+            "include_workspace": include_workspace,
+            "copied_files": counters.files,
+            "copied_bytes": counters.bytes,
+            "missing": counters.missing,
+            "skipped": counters.skipped,
+            "entries": entries,
+        });
+        fs::write(
+            &report_path,
+            serde_json::to_vec_pretty(&report).map_err(error_string)?,
+        )
+        .map_err(error_string)?;
+        Ok(FileCollectionReport {
+            destination: package.display().to_string(),
+            report_path: report_path.display().to_string(),
+            copied_files: counters.files,
+            copied_bytes: counters.bytes,
+            missing: counters.missing,
+            skipped: counters.skipped,
+        })
+    })
+    .await
+    .map_err(error_string)?
+}
+
+#[derive(Default)]
+struct CollectionCounters {
+    files: usize,
+    bytes: u64,
+    missing: usize,
+    skipped: usize,
+}
+
+const COLLECTION_FILE_LIMIT: usize = 50_000;
+const COLLECTION_BYTE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+
+fn copy_tree(
+    source: &Path,
+    target: &Path,
+    package: &Path,
+    counters: &mut CollectionCounters,
+    entries: &mut Vec<FileCollectionEntry>,
+    origins: Vec<String>,
+) {
+    if counters.files >= COLLECTION_FILE_LIMIT || counters.bytes >= COLLECTION_BYTE_LIMIT {
+        counters.skipped += 1;
+        entries.push(collection_skip(
+            source,
+            "Paket güvenlik sınırına ulaştı",
+            origins,
+        ));
+        return;
+    }
+    let Ok(children) = fs::read_dir(source) else {
+        counters.skipped += 1;
+        entries.push(collection_skip(source, "Klasör okunamadı", origins));
+        return;
+    };
+    for child in children.flatten() {
+        let path = child.path();
+        if path.starts_with(package) {
+            continue;
+        }
+        let next_target = target.join(child.file_name());
+        match child.file_type() {
+            Ok(kind) if kind.is_symlink() => {
+                counters.skipped += 1;
+                entries.push(collection_skip(
+                    &path,
+                    "Sembolik bağlantı takip edilmedi",
+                    origins.clone(),
+                ));
+            }
+            Ok(kind) if kind.is_dir() => {
+                copy_tree(
+                    &path,
+                    &next_target,
+                    package,
+                    counters,
+                    entries,
+                    origins.clone(),
+                );
+            }
+            Ok(kind) if kind.is_file() => {
+                copy_one(&path, &next_target, counters, entries, origins.clone());
+            }
+            _ => {
+                counters.skipped += 1;
+                entries.push(collection_skip(
+                    &path,
+                    "Desteklenmeyen dosya türü",
+                    origins.clone(),
+                ));
+            }
+        }
+        if counters.files >= COLLECTION_FILE_LIMIT || counters.bytes >= COLLECTION_BYTE_LIMIT {
+            break;
+        }
+    }
+}
+
+fn copy_one(
+    source: &Path,
+    target: &Path,
+    counters: &mut CollectionCounters,
+    entries: &mut Vec<FileCollectionEntry>,
+    origins: Vec<String>,
+) {
+    if counters.files >= COLLECTION_FILE_LIMIT || counters.bytes >= COLLECTION_BYTE_LIMIT {
+        counters.skipped += 1;
+        entries.push(collection_skip(
+            source,
+            "Paket güvenlik sınırına ulaştı",
+            origins,
+        ));
+        return;
+    }
+    let size = source
+        .metadata()
+        .map(|value| value.len())
+        .unwrap_or_default();
+    if counters.bytes.saturating_add(size) > COLLECTION_BYTE_LIMIT {
+        counters.skipped += 1;
+        entries.push(collection_skip(
+            source,
+            "4 GB paket sınırını aşardı",
+            origins,
+        ));
+        return;
+    }
+    let result = target
+        .parent()
+        .ok_or_else(|| std::io::Error::other("Hedef klasör yok"))
+        .and_then(fs::create_dir_all)
+        .and_then(|_| fs::copy(source, target));
+    match result {
+        Ok(bytes) => {
+            counters.files += 1;
+            counters.bytes += bytes;
+            entries.push(FileCollectionEntry {
+                source: source.display().to_string(),
+                destination: Some(target.display().to_string()),
+                status: "copied".into(),
+                reason: None,
+                origins,
+            });
+        }
+        Err(error) => {
+            counters.skipped += 1;
+            entries.push(collection_skip(source, &error.to_string(), origins));
+        }
+    }
+}
+
+fn collection_skip(source: &Path, reason: &str, origins: Vec<String>) -> FileCollectionEntry {
+    FileCollectionEntry {
+        source: source.display().to_string(),
+        destination: None,
+        status: "skipped".into(),
+        reason: Some(reason.into()),
+        origins,
+    }
+}
+
+fn unique_collection_path(base: &Path, title: &str) -> PathBuf {
+    let safe = title
+        .chars()
+        .map(|value| {
+            if value.is_alphanumeric() || matches!(value, '-' | '_') {
+                value
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .chars()
+        .take(56)
+        .collect::<String>();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let stem = format!(
+        "{}-{stamp}",
+        if safe.is_empty() { "session" } else { &safe }
+    );
+    let mut candidate = base.join(&stem);
+    let mut suffix = 2;
+    while candidate.exists() {
+        candidate = base.join(format!("{stem}-{suffix}"));
+        suffix += 1;
+    }
+    candidate
+}
+
+fn portable_source_path(source: &Path) -> PathBuf {
+    let mut output = PathBuf::new();
+    for component in source.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => {
+                output.push(prefix.as_os_str().to_string_lossy().replace(':', ""));
+            }
+            std::path::Component::Normal(value) => output.push(value),
+            std::path::Component::ParentDir => output.push("_parent"),
+            _ => {}
+        }
+    }
+    output
+}
+
+#[tauri::command]
 async fn usage_costs(
     provider: Option<String>,
     state: State<'_, AppState>,
@@ -200,12 +530,13 @@ async fn usage_costs(
 
 #[tauri::command]
 fn reveal_path(path: String) -> Result<String, String> {
-    let requested = PathBuf::from(&path);
+    let requested = normalize_requested_path(&path)?;
     let missing = !requested.exists();
     let existing = if missing {
         requested
-            .parent()
-            .filter(|parent| parent.is_dir())
+            .ancestors()
+            .skip(1)
+            .find(|parent| parent.is_dir())
             .map(Path::to_path_buf)
             .ok_or_else(|| format!("Dosya ve önceki klasörü artık bu konumda değil: {path}"))?
     } else {
@@ -245,6 +576,44 @@ fn reveal_path(path: String) -> Result<String, String> {
             .map_err(error_string)?;
     }
     Ok(existing.display().to_string())
+}
+
+fn normalize_requested_path(value: &str) -> Result<PathBuf, String> {
+    let cleaned = value
+        .trim()
+        .trim_matches(['"', '\'', '<', '>'])
+        .trim_start_matches("file:///")
+        .trim_start_matches("file://")
+        .to_string();
+    #[cfg(target_os = "windows")]
+    let cleaned = {
+        let mut cleaned = cleaned.replace('/', "\\");
+        if cleaned.len() >= 4
+            && cleaned.starts_with('\\')
+            && cleaned.as_bytes().get(2) == Some(&b':')
+            && cleaned.as_bytes().get(3) == Some(&b'\\')
+        {
+            cleaned.remove(0);
+        }
+        if let Some(index) = cleaned
+            .char_indices()
+            .skip(3)
+            .find(|(index, value)| {
+                *value == '\\'
+                    && cleaned.as_bytes().get(index + 2) == Some(&b':')
+                    && cleaned.as_bytes().get(index + 3) == Some(&b'\\')
+            })
+            .map(|(index, _)| index + 1)
+        {
+            cleaned = cleaned[index..].to_string();
+        }
+        cleaned
+    };
+    let path = PathBuf::from(&cleaned);
+    if !path.is_absolute() {
+        return Err(format!("Mutlak bir dosya yolu bulunamadı: {value}"));
+    }
+    Ok(path)
 }
 
 #[tauri::command]
@@ -439,6 +808,7 @@ pub fn run() {
             get_session_turns,
             get_tool_call,
             get_session_files,
+            collect_session_files,
             usage_analytics,
             usage_costs,
             reveal_path,
@@ -447,4 +817,51 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Contextractor");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_collection_copies_tree_with_structure_and_origins() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("package").join("workspace");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested").join("note.md"), "hello").unwrap();
+        let mut counters = CollectionCounters::default();
+        let mut entries = Vec::new();
+        copy_tree(
+            &source,
+            &target,
+            &root.path().join("package"),
+            &mut counters,
+            &mut entries,
+            vec!["workspace".into()],
+        );
+        assert_eq!(counters.files, 1);
+        assert_eq!(counters.bytes, 5);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            fs::read_to_string(target.join("nested").join("note.md")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn reveal_path_repairs_markdown_and_duplicated_windows_roots() {
+        assert_eq!(
+            normalize_requested_path("/E:/Obsidian Vaults/Trace Analysis/system/index.md").unwrap(),
+            PathBuf::from(r"E:\Obsidian Vaults\Trace Analysis\system\index.md")
+        );
+        assert_eq!(
+            normalize_requested_path(
+                r"E:\trace analysis\E:\Obsidian Vaults\Trace Analysis\system\index.md"
+            )
+            .unwrap(),
+            PathBuf::from(r"E:\Obsidian Vaults\Trace Analysis\system\index.md")
+        );
+    }
 }

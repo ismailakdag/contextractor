@@ -1,11 +1,32 @@
 import { useMemo, useState } from "react";
-import { CircleDollarSign, Plus, RotateCcw } from "lucide-react";
+import { Check, CircleDollarSign, Palette, Plus, RotateCcw, Type } from "lucide-react";
 import { defaultPrices, withUnknownModels } from "./prices";
-import type { PriceSetting, Provider, SessionListItem } from "./types";
+import type { FontId, PriceSetting, Provider, SessionListItem, ThemeId } from "./types";
 
 const labels: Record<Provider, string> = { codex: "Codex", claude: "Claude", grok: "Grok", antigravity: "AGY" };
+const themeOptions: Array<{ id: ThemeId; label: string; note: string }> = [
+  { id: "light", label: "Arşiv", note: "Nötr açık" },
+  { id: "sepia", label: "Kağıt", note: "Sıcak açık" },
+  { id: "dark", label: "Koyu", note: "Orman siyahı" },
+  { id: "graphite", label: "Gece", note: "Soğuk grafit" },
+];
+const fontOptions: Array<{ id: FontId; label: string; note: string }> = [
+  { id: "archivo", label: "Archivo", note: "Yoğun ve teknik" },
+  { id: "manrope", label: "Manrope", note: "Sade ve yumuşak" },
+  { id: "source-serif", label: "Source Serif", note: "Uzun okumalar" },
+];
 
-export function SettingsView({ prices, sessions, onChange }: { prices: PriceSetting[]; sessions: SessionListItem[]; onChange: (prices: PriceSetting[]) => void }) {
+type SettingsViewProps = {
+  prices: PriceSetting[];
+  sessions: SessionListItem[];
+  onChange: (prices: PriceSetting[]) => void;
+  theme: ThemeId;
+  fontFamily: FontId;
+  onThemeChange: (theme: ThemeId) => void;
+  onFontChange: (font: FontId) => void;
+};
+
+export function SettingsView({ prices, sessions, onChange, theme, fontFamily, onThemeChange, onFontChange }: SettingsViewProps) {
   const rows = useMemo(() => withUnknownModels(prices, sessions), [prices, sessions]);
   const [provider, setProvider] = useState<Provider>("codex");
   const [pattern, setPattern] = useState("");
@@ -24,28 +45,52 @@ export function SettingsView({ prices, sessions, onChange }: { prices: PriceSett
   return (
     <section className="insight-surface settings-view">
       <header className="surface-heading">
-        <div><h1>API fiyatları</h1><p>Kayıtlı tokenları API karşılığına çevirmek için kullanılan yerel katalog.</p></div>
-        <button className="secondary-button" onClick={() => onChange(defaultPrices)}><RotateCcw size={14} /> Varsayılanlar</button>
+        <div><h1>Ayarlar</h1><p>Görünüm tercihleri ve yerel maliyet kataloğu bu cihazda saklanır.</p></div>
       </header>
-      <div className="pricing-note"><CircleDollarSign size={17} /><p>Fiyatlar milyon token başınadır. Cache okuma ve kayıtta bulunan cache yazma ayrı hesaplanır; reasoning tokenları sağlayıcının output sayacındaki haliyle ücretlendirilir. Kaydedilmeyen tool ücreti, cache saklama ve uzun-context farkı tahmine eklenmez.</p></div>
-      <div className="price-table">
-        <div className="price-head"><span>Model eşleşmesi</span><span>Input</span><span>Cache read</span><span>Cache write</span><span>Output</span><span>Tarih</span></div>
-        {rows.map((entry) => (
-          <div className={`price-row ${entry.input_per_million_usd == null || entry.output_per_million_usd == null ? "missing" : ""}`} key={entry.id}>
-            <div className="price-model"><span className={`usage-dot ${entry.provider}`} /><strong>{entry.catalog_model}</strong><small>{labels[entry.provider]} · {entry.model_pattern}{entry.built_in ? " · katalog" : " · özel"}</small></div>
-            <input aria-label={`${entry.catalog_model} input fiyatı`} type="number" min="0" step="0.01" value={entry.input_per_million_usd ?? ""} placeholder="—" onChange={(event) => update(entry.id, "input_per_million_usd", event.target.value)} />
-            <input aria-label={`${entry.catalog_model} cached input fiyatı`} type="number" min="0" step="0.01" value={entry.cached_input_per_million_usd ?? ""} placeholder="—" onChange={(event) => update(entry.id, "cached_input_per_million_usd", event.target.value)} />
-            <input aria-label={`${entry.catalog_model} cache write fiyatı`} type="number" min="0" step="0.01" value={entry.cache_write_per_million_usd ?? ""} placeholder="—" onChange={(event) => update(entry.id, "cache_write_per_million_usd", event.target.value)} />
-            <input aria-label={`${entry.catalog_model} output fiyatı`} type="number" min="0" step="0.01" value={entry.output_per_million_usd ?? ""} placeholder="—" onChange={(event) => update(entry.id, "output_per_million_usd", event.target.value)} />
-            <input aria-label={`${entry.catalog_model} fiyat tarihi`} value={entry.effective_date ?? ""} placeholder="YYYY-AA-GG" onChange={(event) => update(entry.id, "effective_date", event.target.value)} />
-          </div>
-        ))}
-      </div>
-      <div className="add-price-row">
-        <select value={provider} onChange={(event) => setProvider(event.target.value as Provider)}>{Object.entries(labels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select>
-        <input value={pattern} onChange={(event) => setPattern(event.target.value)} placeholder="Yeni model veya eşleşme kalıbı" onKeyDown={(event) => { if (event.key === "Enter") add(); }} />
-        <button className="secondary-button" onClick={add}><Plus size={14} /> Model ekle</button>
-      </div>
+
+      <section className="settings-section appearance-settings">
+        <div className="section-heading"><div><Palette size={16} /><h2>Tema</h2></div><span>Kontrastı dengelenmiş dört palet</span></div>
+        <div className="theme-options" role="radiogroup" aria-label="Uygulama teması">
+          {themeOptions.map((option) => (
+            <button key={option.id} className={`theme-option ${theme === option.id ? "active" : ""}`} role="radio" aria-checked={theme === option.id} onClick={() => onThemeChange(option.id)}>
+              <span className={`theme-preview ${option.id}`}><i /><i /><i /></span>
+              <span><strong>{option.label}</strong><small>{option.note}</small></span>
+              {theme === option.id && <Check size={14} />}
+            </button>
+          ))}
+        </div>
+        <div className="section-heading font-heading"><div><Type size={16} /><h2>Yazı karakteri</h2></div><span>Arayüz ve konuşma metinleri</span></div>
+        <div className="font-options" role="radiogroup" aria-label="Yazı karakteri">
+          {fontOptions.map((option) => (
+            <button key={option.id} className={`font-option ${option.id} ${fontFamily === option.id ? "active" : ""}`} role="radio" aria-checked={fontFamily === option.id} onClick={() => onFontChange(option.id)}>
+              <b>Aa</b><span><strong>{option.label}</strong><small>{option.note}</small></span>{fontFamily === option.id && <Check size={14} />}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="settings-section pricing-settings">
+        <div className="section-heading pricing-heading"><div><CircleDollarSign size={16} /><h2>API fiyatları</h2></div><button className="secondary-button" onClick={() => onChange(defaultPrices)}><RotateCcw size={14} /> Varsayılanlar</button></div>
+        <div className="pricing-note"><CircleDollarSign size={17} /><p>Fiyatlar milyon token başınadır. Cache okuma ve kayıtta bulunan cache yazma ayrı hesaplanır; reasoning tokenları sağlayıcının output sayacındaki haliyle ücretlendirilir. Kaydedilmeyen tool ücreti, cache saklama ve uzun-context farkı tahmine eklenmez.</p></div>
+        <div className="price-table">
+          <div className="price-head"><span>Model eşleşmesi</span><span>Input</span><span>Cache read</span><span>Cache write</span><span>Output</span><span>Tarih</span></div>
+          {rows.map((entry) => (
+            <div className={`price-row ${entry.input_per_million_usd == null || entry.output_per_million_usd == null ? "missing" : ""}`} key={entry.id}>
+              <div className="price-model"><span className={`usage-dot ${entry.provider}`} /><strong>{entry.catalog_model}</strong><small>{labels[entry.provider]} · {entry.model_pattern}{entry.built_in ? " · katalog" : " · özel"}</small></div>
+              <input aria-label={`${entry.catalog_model} input fiyatı`} type="number" min="0" step="0.01" value={entry.input_per_million_usd ?? ""} placeholder="—" onChange={(event) => update(entry.id, "input_per_million_usd", event.target.value)} />
+              <input aria-label={`${entry.catalog_model} cached input fiyatı`} type="number" min="0" step="0.01" value={entry.cached_input_per_million_usd ?? ""} placeholder="—" onChange={(event) => update(entry.id, "cached_input_per_million_usd", event.target.value)} />
+              <input aria-label={`${entry.catalog_model} cache write fiyatı`} type="number" min="0" step="0.01" value={entry.cache_write_per_million_usd ?? ""} placeholder="—" onChange={(event) => update(entry.id, "cache_write_per_million_usd", event.target.value)} />
+              <input aria-label={`${entry.catalog_model} output fiyatı`} type="number" min="0" step="0.01" value={entry.output_per_million_usd ?? ""} placeholder="—" onChange={(event) => update(entry.id, "output_per_million_usd", event.target.value)} />
+              <input aria-label={`${entry.catalog_model} fiyat tarihi`} value={entry.effective_date ?? ""} placeholder="YYYY-AA-GG" onChange={(event) => update(entry.id, "effective_date", event.target.value)} />
+            </div>
+          ))}
+        </div>
+        <div className="add-price-row">
+          <select value={provider} onChange={(event) => setProvider(event.target.value as Provider)}>{Object.entries(labels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select>
+          <input value={pattern} onChange={(event) => setPattern(event.target.value)} placeholder="Yeni model veya eşleşme kalıbı" onKeyDown={(event) => { if (event.key === "Enter") add(); }} />
+          <button className="secondary-button" onClick={add}><Plus size={14} /> Model ekle</button>
+        </div>
+      </section>
     </section>
   );
 }

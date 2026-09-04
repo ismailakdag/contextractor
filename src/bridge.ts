@@ -4,6 +4,7 @@ import type {
   AppInfo,
   DiscoveryReport,
   FileReference,
+  FileCollectionReport,
   ImportProgress,
   ImportReport,
   SessionDetail,
@@ -85,6 +86,11 @@ export async function getToolCall(id: string, turnOrdinal: number, toolOrdinal: 
 export async function getSessionFiles(id: string): Promise<FileReference[]> {
   if (!isDesktop) return [];
   return invoke("get_session_files", { id });
+}
+
+export async function collectSessionFiles(id: string, destination: string | undefined, includeWorkspace: boolean): Promise<FileCollectionReport> {
+  if (!isDesktop) throw new Error("Dosya paketi yalnızca masaüstü uygulamasında oluşturulabilir.");
+  return invoke("collect_session_files", { id, destination: destination || null, includeWorkspace });
 }
 
 export async function revealPath(path: string): Promise<string> {
