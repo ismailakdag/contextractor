@@ -245,19 +245,15 @@ async fn collect_session_files(
                 });
                 continue;
             }
-            let target = package
-                .join("references")
-                .join(portable_source_path(&source));
             if source.is_dir() {
-                copy_tree(
+                counters.skipped += 1;
+                entries.push(collection_skip(
                     &source,
-                    &target,
-                    &package,
-                    &mut counters,
-                    &mut entries,
+                    "Klasörün tamamı kopyalanmadı; yalnız açıkça belirtilen dosyalar paketlenir",
                     reference.origins,
-                );
+                ));
             } else {
+                let target = unique_flat_file_path(&package, &source);
                 copy_one(
                     &source,
                     &target,
@@ -309,86 +305,11 @@ struct CollectionCounters {
     skipped: usize,
     duplicates: usize,
     seen_files: std::collections::HashMap<String, String>,
-    seen_directories: std::collections::HashMap<String, String>,
     seen_missing: std::collections::HashSet<String>,
 }
 
 const COLLECTION_FILE_LIMIT: usize = 50_000;
 const COLLECTION_BYTE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
-
-fn copy_tree(
-    source: &Path,
-    target: &Path,
-    package: &Path,
-    counters: &mut CollectionCounters,
-    entries: &mut Vec<FileCollectionEntry>,
-    origins: Vec<String>,
-) {
-    let source_key = collection_path_key(source);
-    if let Some(previous) = counters.seen_directories.get(&source_key).cloned() {
-        counters.duplicates += 1;
-        entries.push(collection_duplicate(source, &previous, origins));
-        return;
-    }
-    counters
-        .seen_directories
-        .insert(source_key, target.display().to_string());
-    if counters.files >= COLLECTION_FILE_LIMIT || counters.bytes >= COLLECTION_BYTE_LIMIT {
-        counters.skipped += 1;
-        entries.push(collection_skip(
-            source,
-            "Paket güvenlik sınırına ulaştı",
-            origins,
-        ));
-        return;
-    }
-    let Ok(children) = fs::read_dir(source) else {
-        counters.skipped += 1;
-        entries.push(collection_skip(source, "Klasör okunamadı", origins));
-        return;
-    };
-    for child in children.flatten() {
-        let path = child.path();
-        if path.starts_with(package) {
-            continue;
-        }
-        let next_target = target.join(child.file_name());
-        match child.file_type() {
-            Ok(kind) if kind.is_symlink() => {
-                counters.skipped += 1;
-                entries.push(collection_skip(
-                    &path,
-                    "Sembolik bağlantı takip edilmedi",
-                    origins.clone(),
-                ));
-            }
-            Ok(kind) if kind.is_dir() => {
-                copy_tree(
-                    &path,
-                    &next_target,
-                    package,
-                    counters,
-                    entries,
-                    origins.clone(),
-                );
-            }
-            Ok(kind) if kind.is_file() => {
-                copy_one(&path, &next_target, counters, entries, origins.clone());
-            }
-            _ => {
-                counters.skipped += 1;
-                entries.push(collection_skip(
-                    &path,
-                    "Desteklenmeyen dosya türü",
-                    origins.clone(),
-                ));
-            }
-        }
-        if counters.files >= COLLECTION_FILE_LIMIT || counters.bytes >= COLLECTION_BYTE_LIMIT {
-            break;
-        }
-    }
-}
 
 fn copy_one(
     source: &Path,
@@ -530,19 +451,29 @@ fn unique_collection_path(base: &Path, title: &str) -> PathBuf {
     candidate
 }
 
-fn portable_source_path(source: &Path) -> PathBuf {
-    let mut output = PathBuf::new();
-    for component in source.components() {
-        match component {
-            std::path::Component::Prefix(prefix) => {
-                output.push(prefix.as_os_str().to_string_lossy().replace(':', ""));
-            }
-            std::path::Component::Normal(value) => output.push(value),
-            std::path::Component::ParentDir => output.push("_parent"),
-            _ => {}
-        }
+fn unique_flat_file_path(package: &Path, source: &Path) -> PathBuf {
+    let file_name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("dosya");
+    let mut candidate = package.join(file_name);
+    let stem = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("dosya");
+    let extension = source.extension().and_then(|value| value.to_str());
+    let mut suffix = 2;
+    while candidate.exists() {
+        let name = match extension {
+            Some(extension) => format!("{stem} ({suffix}).{extension}"),
+            None => format!("{stem} ({suffix})"),
+        };
+        candidate = package.join(name);
+        suffix += 1;
     }
-    output
+    candidate
 }
 
 #[tauri::command]
@@ -946,32 +877,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_collection_copies_tree_with_structure_and_origins() {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("source");
-        let target = root.path().join("package").join("workspace");
-        fs::create_dir_all(source.join("nested")).unwrap();
-        fs::write(source.join("nested").join("note.md"), "hello").unwrap();
-        let mut counters = CollectionCounters::default();
-        let mut entries = Vec::new();
-        copy_tree(
-            &source,
-            &target,
-            &root.path().join("package"),
-            &mut counters,
-            &mut entries,
-            vec!["workspace".into()],
-        );
-        assert_eq!(counters.files, 1);
-        assert_eq!(counters.bytes, 5);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(
-            fs::read_to_string(target.join("nested").join("note.md")).unwrap(),
-            "hello"
-        );
-    }
-
-    #[test]
     fn file_collection_filters_conversation_origins() {
         let user_and_tool = vec!["user".into(), "tool".into()];
         let assistant = vec!["assistant".into()];
@@ -1008,6 +913,18 @@ mod tests {
         assert_eq!(counters.duplicates, 1);
         assert!(!root.path().join("second.md").exists());
         assert_eq!(entries[1].status, "deduplicated");
+    }
+
+    #[test]
+    fn flat_package_keeps_files_at_root_and_resolves_name_collisions() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        fs::create_dir(&package).unwrap();
+        let first = unique_flat_file_path(&package, Path::new(r"C:\one\report.pdf"));
+        assert_eq!(first, package.join("report.pdf"));
+        fs::write(&first, "first").unwrap();
+        let second = unique_flat_file_path(&package, Path::new(r"D:\two\report.pdf"));
+        assert_eq!(second, package.join("report (2).pdf"));
     }
 
     #[test]

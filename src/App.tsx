@@ -1185,7 +1185,7 @@ function EvidencePanel({ cost, session, files, filesLoading, open, onClose, onNo
       </div>
       <div className="file-collection-section">
         <div className="file-reference-heading"><span>Dosya paketi</span><small>raporlu kopya</small></div>
-        <p>Yalnızca konuşmada @ ile açıkça belirtilen veya sohbete eklenen dosyaları kopyalar. Aynı fiziksel dosya yalnız bir kez alınır; eksikler JSON raporuna yazılır.</p>
+        <p>@ ile belirtilen veya sohbete eklenen dosyaları tek klasöre kopyalar. Kaynak klasör ağacı oluşturulmaz; aynı adlı dosyalara numara eklenir.</p>
         <div className="file-filter-strip collection-origin-strip" aria-label="Dosya paketine dahil edilecek kaynak">
           {([['user', 'Sen'], ['assistant', 'Asistan'], ['all', 'Tümü']] as const).map(([id, label]) => (
             <button key={id} className={collectionOrigin === id ? "active" : ""} onClick={() => setCollectionOrigin(id)}>{label}<small>{id === "all" ? "Sen + Asistan" : ""}</small></button>
