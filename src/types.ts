@@ -1,5 +1,5 @@
 export type Provider = "codex" | "claude" | "grok" | "antigravity";
-export type ThemeId = "light" | "dark" | "graphite" | "sepia";
+export type ThemeId = "light" | "dark" | "graphite" | "sepia" | "petrol" | "plum" | "coral";
 export type FontId = "archivo" | "manrope" | "source-serif";
 
 export interface SourceCandidate {
@@ -185,10 +185,12 @@ export interface FileReference {
 export interface FileCollectionReport {
   destination: string;
   report_path: string;
+  selected_references: number;
   copied_files: number;
   copied_bytes: number;
   missing: number;
   skipped: number;
+  duplicates: number;
 }
 
 export interface UsageCostRow {

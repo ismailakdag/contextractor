@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Permissions for the Contextractor main window","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-save"]}}
+{"default":{"identifier":"default","description":"Permissions for the Contextractor main window","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-save","dialog:allow-open"]}}

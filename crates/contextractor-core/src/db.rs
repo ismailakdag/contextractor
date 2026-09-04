@@ -1317,7 +1317,7 @@ fn extract_windows_paths(text: &str) -> Vec<String> {
     while cursor + 2 < bytes.len() {
         if !bytes[cursor].is_ascii_alphabetic()
             || bytes[cursor + 1] != b':'
-            || bytes[cursor + 2] != b'\\'
+            || !matches!(bytes[cursor + 2], b'\\' | b'/')
         {
             cursor += 1;
             continue;
@@ -1356,7 +1356,7 @@ fn extract_windows_paths(text: &str) -> Vec<String> {
             end = start + relative_end;
         } else {
             let leaf_has_space = candidate
-                .rsplit('\\')
+                .rsplit(['\\', '/'])
                 .next()
                 .is_some_and(|leaf| leaf.contains(char::is_whitespace));
             if leaf_has_space && !std::path::Path::new(candidate.trim()).exists() {
@@ -1711,7 +1711,7 @@ mod tests {
     #[test]
     fn file_path_extraction_handles_unquoted_mentions_and_directories() {
         let paths = extract_file_paths(
-            "@C:\\Users\\ismai\\Downloads\\JRFID\\JRFID_Article.docx and @C:\\Users\\ismai\\Downloads\\JRFID\\High Gain Suspended Patch Antenna Element with Contactless Capacitive Coupling Feed.docx\nE:\\trace analysis\\TRACE_ANALYSIS_MASTER_WORKFLOW    burada",
+            "@C:\\Users\\ismai\\Downloads\\JRFID\\JRFID_Article.docx and @C:\\Users\\ismai\\Downloads\\JRFID\\High Gain Suspended Patch Antenna Element with Contactless Capacitive Coupling Feed.docx\nE:\\trace analysis\\TRACE_ANALYSIS_MASTER_WORKFLOW    burada\nE:/Obsidian Vaults/Trace Analysis/system/index.md",
         );
         assert_eq!(
             paths,
@@ -1719,6 +1719,7 @@ mod tests {
                 r"C:\Users\ismai\Downloads\JRFID\JRFID_Article.docx",
                 r"C:\Users\ismai\Downloads\JRFID\High Gain Suspended Patch Antenna Element with Contactless Capacitive Coupling Feed.docx",
                 r"E:\trace analysis\TRACE_ANALYSIS_MASTER_WORKFLOW",
+                r"E:\Obsidian Vaults\Trace Analysis\system\index.md",
             ]
         );
     }

@@ -1,5 +1,5 @@
 import { Children, isValidElement, memo, useMemo, useState, type ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import hljs from "highlight.js/lib/core";
@@ -43,12 +43,12 @@ export const MarkdownBody = memo(function MarkdownBody({ source, basePath }: { s
   const displaySource = useMemo(() => cleanDisplayText(source), [source]);
   const clipped = displaySource.length > COLLAPSE_AT && !expanded;
   const visibleContent = clipped ? `${displaySource.slice(0, COLLAPSE_AT)}\n\n…` : displaySource;
-  const content = useMemo(() => linkifyLocalMentions(visibleContent), [visibleContent]);
   return (
     <div className="markdown-body">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkLocalFileMentions]}
         rehypePlugins={[rehypeHighlight]}
+        urlTransform={(url) => isLocalReference(url) || /^\/[a-zA-Z]:[\\/]/.test(url) ? url : defaultUrlTransform(url)}
         skipHtml
         components={{
           img: ({ src, alt }) => <SafeImage src={src} alt={alt} basePath={basePath} />,
@@ -58,7 +58,7 @@ export const MarkdownBody = memo(function MarkdownBody({ source, basePath }: { s
             : <a href={href} target="_blank" rel="noreferrer">{children}</a>,
         }}
       >
-        {content}
+        {visibleContent}
       </ReactMarkdown>
       {displaySource.length > COLLAPSE_AT && (
         <button className="text-expander" onClick={() => setExpanded((value) => !value)}>
@@ -108,25 +108,46 @@ function LocalFileLink({ href, basePath, children }: { href: string; basePath?: 
   return <button className={`inline-file-link ${missing ? "missing" : ""}`} onClick={() => void open()} title={`${path} · klasörde göster`}>{children}</button>;
 }
 
-function linkifyLocalMentions(source: string) {
-  const matches = findWindowsPaths(source);
-  if (!matches.length) return source;
-  let output = "";
-  let cursor = 0;
-  for (const match of matches) {
-    output += source.slice(cursor, match.start);
-    const label = match.label.replace(/([\\\[\]])/g, "\\$1");
-    output += `[${label}](#local-file=${encodeURIComponent(match.path)})`;
-    cursor = match.end;
+type MarkdownNode = { type: string; value?: string; url?: string; children?: MarkdownNode[] };
+
+function remarkLocalFileMentions() {
+  return (tree: MarkdownNode) => visitMarkdownText(tree);
+}
+
+function visitMarkdownText(node: MarkdownNode) {
+  if (!node.children || node.type === "link" || node.type === "code" || node.type === "inlineCode") return;
+  const children: MarkdownNode[] = [];
+  for (const child of node.children) {
+    if (child.type !== "text" || !child.value) {
+      visitMarkdownText(child);
+      children.push(child);
+      continue;
+    }
+    const matches = findWindowsPaths(child.value);
+    if (!matches.length) {
+      children.push(child);
+      continue;
+    }
+    let cursor = 0;
+    for (const match of matches) {
+      if (match.start > cursor) children.push({ type: "text", value: child.value.slice(cursor, match.start) });
+      children.push({
+        type: "link",
+        url: `#local-file=${encodeURIComponent(match.path)}`,
+        children: [{ type: "text", value: match.label }],
+      });
+      cursor = match.end;
+    }
+    if (cursor < child.value.length) children.push({ type: "text", value: child.value.slice(cursor) });
   }
-  return output + source.slice(cursor);
+  node.children = children;
 }
 
 const FILE_EXTENSIONS = ["docx", "doc", "pdf", "md", "txt", "rtf", "xlsx", "xls", "csv", "pptx", "ppt", "json", "jsonl", "toml", "yaml", "yml", "xml", "html", "css", "tsx", "ts", "jsx", "js", "py", "rs", "png", "jpg", "jpeg", "gif", "webp", "svg", "zip", "7z"];
 
 function findWindowsPaths(source: string) {
   const matches: Array<{ start: number; end: number; path: string; label: string }> = [];
-  const drive = /[a-zA-Z]:\\/g;
+  const drive = /[a-zA-Z]:[\\/]/g;
   let found: RegExpExecArray | null;
   while ((found = drive.exec(source))) {
     const driveStart = found.index;
@@ -143,11 +164,11 @@ function findWindowsPaths(source: string) {
       const wideSpace = /\s{2,}/.exec(candidate);
       if (wideSpace) {
         pathEnd = driveStart + wideSpace.index;
-      } else if (/\s/.test(candidate.split("\\").at(-1) || "")) {
+      } else if (/\s/.test(candidate.split(/[\\/]/).at(-1) || "")) {
         continue;
       }
     }
-    let path = source.slice(driveStart, pathEnd).trimEnd().replace(/[.,;:!?]+$/, "");
+    const path = source.slice(driveStart, pathEnd).trimEnd().replace(/[.,;:!?]+$/, "");
     pathEnd = driveStart + path.length;
     if (path.length < 4) continue;
     const end = quoted && source[pathEnd] === '"' ? pathEnd + 1 : pathEnd;
@@ -189,6 +210,9 @@ function resolveLocalPath(value: string, basePath?: string) {
   // Codex renders absolute Windows links as </E:/...>. The leading slash is
   // Markdown syntax, not part of the Windows path.
   if (/^\/[a-zA-Z]:[\\/]/.test(decoded)) decoded = decoded.slice(1);
+  // Providers sometimes Markdown-escape underscores while keeping forward
+  // slashes in a Windows path. Those backslashes are escapes, not folders.
+  if (/^[a-zA-Z]:\//.test(decoded)) decoded = decoded.replace(/\\([_*\[\]()#])/g, "$1");
   const cleaned = decoded.replace(/\//g, "\\");
   if (/^[a-zA-Z]:\\/.test(cleaned) || cleaned.startsWith("\\\\") || !basePath) return cleaned;
   return `${basePath.replace(/[\\/]+$/, "")}\\${cleaned.replace(/^[\\/]+/, "")}`;

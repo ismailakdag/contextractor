@@ -9,6 +9,9 @@ const themeOptions: Array<{ id: ThemeId; label: string; note: string }> = [
   { id: "sepia", label: "Kağıt", note: "Sıcak açık" },
   { id: "dark", label: "Koyu", note: "Orman siyahı" },
   { id: "graphite", label: "Gece", note: "Soğuk grafit" },
+  { id: "petrol", label: "Petrol", note: "Dengeli turkuaz" },
+  { id: "plum", label: "Mürdüm", note: "Yumuşak mor gece" },
+  { id: "coral", label: "Mercan", note: "Canlı sıcak açık" },
 ];
 const fontOptions: Array<{ id: FontId; label: string; note: string }> = [
   { id: "archivo", label: "Archivo", note: "Yoğun ve teknik" },
@@ -49,7 +52,7 @@ export function SettingsView({ prices, sessions, onChange, theme, fontFamily, on
       </header>
 
       <section className="settings-section appearance-settings">
-        <div className="section-heading"><div><Palette size={16} /><h2>Tema</h2></div><span>Kontrastı dengelenmiş dört palet</span></div>
+        <div className="section-heading"><div><Palette size={16} /><h2>Tema</h2></div><span>Kontrastı dengelenmiş yedi palet</span></div>
         <div className="theme-options" role="radiogroup" aria-label="Uygulama teması">
           {themeOptions.map((option) => (
             <button key={option.id} className={`theme-option ${theme === option.id ? "active" : ""}`} role="radio" aria-checked={theme === option.id} onClick={() => onThemeChange(option.id)}>

@@ -42,10 +42,12 @@ struct UsageCostRow {
 struct FileCollectionReport {
     destination: String,
     report_path: String,
+    selected_references: usize,
     copied_files: usize,
     copied_bytes: u64,
     missing: usize,
     skipped: usize,
+    duplicates: usize,
 }
 
 #[derive(Serialize)]
@@ -196,6 +198,7 @@ async fn collect_session_files(
     id: String,
     destination: Option<String>,
     include_workspace: bool,
+    origin_filter: String,
     state: State<'_, AppState>,
 ) -> Result<FileCollectionReport, String> {
     let database_path = state.database_path.clone();
@@ -205,7 +208,15 @@ async fn collect_session_files(
             .get_session_header(&id)
             .map_err(error_string)?
             .ok_or_else(|| "Oturum bulunamadı".to_string())?;
+        if !matches!(origin_filter.as_str(), "user" | "assistant" | "all") {
+            return Err("Geçersiz dosya paketi kaynağı".into());
+        }
         let references = archive.session_file_references(&id).map_err(error_string)?;
+        let references = references
+            .into_iter()
+            .filter(|reference| reference_matches_origin(&reference.origins, &origin_filter))
+            .collect::<Vec<_>>();
+        let selected_references = references.len();
         let base = destination.map(PathBuf::from).unwrap_or_else(|| {
             database_path
                 .parent()
@@ -252,6 +263,11 @@ async fn collect_session_files(
             let source = normalize_requested_path(&reference.path)
                 .unwrap_or_else(|_| PathBuf::from(&reference.path));
             if !source.exists() {
+                let missing_key = collection_path_key(&source);
+                if !counters.seen_missing.insert(missing_key) {
+                    counters.duplicates += 1;
+                    continue;
+                }
                 counters.missing += 1;
                 entries.push(FileCollectionEntry {
                     source: reference.path,
@@ -289,10 +305,13 @@ async fn collect_session_files(
         let report = serde_json::json!({
             "session": { "id": session.id, "title": session.title, "provider": session.provider },
             "include_workspace": include_workspace,
+            "origin_filter": origin_filter,
+            "selected_references": selected_references,
             "copied_files": counters.files,
             "copied_bytes": counters.bytes,
             "missing": counters.missing,
             "skipped": counters.skipped,
+            "duplicates": counters.duplicates,
             "entries": entries,
         });
         fs::write(
@@ -303,10 +322,12 @@ async fn collect_session_files(
         Ok(FileCollectionReport {
             destination: package.display().to_string(),
             report_path: report_path.display().to_string(),
+            selected_references,
             copied_files: counters.files,
             copied_bytes: counters.bytes,
             missing: counters.missing,
             skipped: counters.skipped,
+            duplicates: counters.duplicates,
         })
     })
     .await
@@ -319,6 +340,10 @@ struct CollectionCounters {
     bytes: u64,
     missing: usize,
     skipped: usize,
+    duplicates: usize,
+    seen_files: std::collections::HashMap<String, String>,
+    seen_directories: std::collections::HashMap<String, String>,
+    seen_missing: std::collections::HashSet<String>,
 }
 
 const COLLECTION_FILE_LIMIT: usize = 50_000;
@@ -332,6 +357,15 @@ fn copy_tree(
     entries: &mut Vec<FileCollectionEntry>,
     origins: Vec<String>,
 ) {
+    let source_key = collection_path_key(source);
+    if let Some(previous) = counters.seen_directories.get(&source_key).cloned() {
+        counters.duplicates += 1;
+        entries.push(collection_duplicate(source, &previous, origins));
+        return;
+    }
+    counters
+        .seen_directories
+        .insert(source_key, target.display().to_string());
     if counters.files >= COLLECTION_FILE_LIMIT || counters.bytes >= COLLECTION_BYTE_LIMIT {
         counters.skipped += 1;
         entries.push(collection_skip(
@@ -396,6 +430,12 @@ fn copy_one(
     entries: &mut Vec<FileCollectionEntry>,
     origins: Vec<String>,
 ) {
+    let source_key = collection_path_key(source);
+    if let Some(previous) = counters.seen_files.get(&source_key).cloned() {
+        counters.duplicates += 1;
+        entries.push(collection_duplicate(source, &previous, origins));
+        return;
+    }
     if counters.files >= COLLECTION_FILE_LIMIT || counters.bytes >= COLLECTION_BYTE_LIMIT {
         counters.skipped += 1;
         entries.push(collection_skip(
@@ -425,6 +465,9 @@ fn copy_one(
         .and_then(|_| fs::copy(source, target));
     match result {
         Ok(bytes) => {
+            counters
+                .seen_files
+                .insert(source_key, target.display().to_string());
             counters.files += 1;
             counters.bytes += bytes;
             entries.push(FileCollectionEntry {
@@ -440,6 +483,42 @@ fn copy_one(
             entries.push(collection_skip(source, &error.to_string(), origins));
         }
     }
+}
+
+fn collection_duplicate(
+    source: &Path,
+    previous_destination: &str,
+    origins: Vec<String>,
+) -> FileCollectionEntry {
+    FileCollectionEntry {
+        source: source.display().to_string(),
+        destination: Some(previous_destination.to_string()),
+        status: "deduplicated".into(),
+        reason: Some("Aynı fiziksel kaynak pakette zaten bulunuyor".into()),
+        origins,
+    }
+}
+
+fn reference_matches_origin(origins: &[String], filter: &str) -> bool {
+    match filter {
+        "user" => origins.iter().any(|origin| origin == "user"),
+        "assistant" => origins.iter().any(|origin| origin == "assistant"),
+        "all" => origins
+            .iter()
+            .any(|origin| origin == "user" || origin == "assistant"),
+        _ => false,
+    }
+}
+
+fn collection_path_key(source: &Path) -> String {
+    let value = fs::canonicalize(source)
+        .unwrap_or_else(|_| source.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    #[cfg(target_os = "windows")]
+    return value.replace('/', "\\").to_ascii_lowercase();
+    #[cfg(not(target_os = "windows"))]
+    value
 }
 
 fn collection_skip(source: &Path, reason: &str, origins: Vec<String>) -> FileCollectionEntry {
@@ -533,25 +612,26 @@ fn reveal_path(path: String) -> Result<String, String> {
     let requested = normalize_requested_path(&path)?;
     let missing = !requested.exists();
     let existing = if missing {
-        requested
-            .ancestors()
-            .skip(1)
-            .find(|parent| parent.is_dir())
-            .map(Path::to_path_buf)
-            .ok_or_else(|| format!("Dosya ve önceki klasörü artık bu konumda değil: {path}"))?
+        meaningful_existing_ancestor(&requested).ok_or_else(|| {
+            format!(
+                "Dosya bulunamadı ve güvenle açılabilecek yakın bir klasörü yok; Belgeler'e yönlendirilmedi: {path}"
+            )
+        })?
     } else {
         requested.clone()
     };
 
     #[cfg(target_os = "windows")]
     {
-        let mut command = std::process::Command::new("explorer.exe");
         if !missing && requested.is_file() {
-            command.arg(format!("/select,{}", requested.display()));
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("explorer.exe")
+                .raw_arg(windows_select_argument(&requested))
+                .spawn()
+                .map_err(error_string)?;
         } else {
-            command.arg(&existing);
+            shell_explore_directory(&existing)?;
         }
-        command.spawn().map_err(error_string)?;
     }
     #[cfg(target_os = "macos")]
     {
@@ -576,6 +656,81 @@ fn reveal_path(path: String) -> Result<String, String> {
             .map_err(error_string)?;
     }
     Ok(existing.display().to_string())
+}
+
+fn meaningful_existing_ancestor(requested: &Path) -> Option<PathBuf> {
+    requested
+        .ancestors()
+        .skip(1)
+        .enumerate()
+        .find_map(|(index, parent)| {
+            if !parent.is_dir() {
+                return None;
+            }
+            let distance = index + 1;
+            let generic = parent
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_none_or(|leaf| {
+                    matches!(
+                        leaf.to_ascii_lowercase().as_str(),
+                        "users"
+                            | "documents"
+                            | "downloads"
+                            | "desktop"
+                            | "appdata"
+                            | "local"
+                            | "roaming"
+                    )
+                });
+            (distance <= 3 && (distance == 1 || !generic)).then(|| parent.to_path_buf())
+        })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_select_argument(path: &Path) -> String {
+    format!("/select,\"{}\"", path.display())
+}
+
+#[cfg(target_os = "windows")]
+fn shell_explore_directory(path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    let operation = "explore\0".encode_utf16().collect::<Vec<_>>();
+    let target = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        )
+    };
+    if result <= 32 {
+        return Err(format!(
+            "Klasör Windows Explorer ile açılamadı (hata {result}): {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn ShellExecuteW(
+        hwnd: *mut std::ffi::c_void,
+        operation: *const u16,
+        file: *const u16,
+        parameters: *const u16,
+        directory: *const u16,
+        show_command: i32,
+    ) -> isize;
 }
 
 fn normalize_requested_path(value: &str) -> Result<PathBuf, String> {
@@ -849,6 +1004,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn file_collection_filters_conversation_origins() {
+        let user_and_tool = vec!["user".into(), "tool".into()];
+        let assistant = vec!["assistant".into()];
+        let system = vec!["system".into()];
+        assert!(reference_matches_origin(&user_and_tool, "user"));
+        assert!(reference_matches_origin(&user_and_tool, "all"));
+        assert!(reference_matches_origin(&assistant, "assistant"));
+        assert!(reference_matches_origin(&assistant, "all"));
+        assert!(!reference_matches_origin(&system, "all"));
+    }
+
+    #[test]
+    fn file_collection_deduplicates_the_same_physical_file() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.md");
+        fs::write(&source, "same").unwrap();
+        let mut counters = CollectionCounters::default();
+        let mut entries = Vec::new();
+        copy_one(
+            &source,
+            &root.path().join("first.md"),
+            &mut counters,
+            &mut entries,
+            vec!["user".into()],
+        );
+        copy_one(
+            &source,
+            &root.path().join("second.md"),
+            &mut counters,
+            &mut entries,
+            vec!["assistant".into()],
+        );
+        assert_eq!(counters.files, 1);
+        assert_eq!(counters.duplicates, 1);
+        assert!(!root.path().join("second.md").exists());
+        assert_eq!(entries[1].status, "deduplicated");
+    }
+
+    #[test]
+    fn missing_path_does_not_fall_back_to_a_generic_documents_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let documents = root.path().join("Documents");
+        fs::create_dir(&documents).unwrap();
+        assert!(meaningful_existing_ancestor(&documents.join("missing.md")).is_some());
+        assert!(meaningful_existing_ancestor(
+            &documents
+                .join("missing-project")
+                .join("nested")
+                .join("file.md")
+        )
+        .is_none());
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn reveal_path_repairs_markdown_and_duplicated_windows_roots() {
@@ -862,6 +1071,12 @@ mod tests {
             )
             .unwrap(),
             PathBuf::from(r"E:\Obsidian Vaults\Trace Analysis\system\index.md")
+        );
+        assert_eq!(
+            windows_select_argument(Path::new(
+                r"E:\Obsidian Vaults\Trace Analysis\system\index.md"
+            )),
+            r#"/select,"E:\Obsidian Vaults\Trace Analysis\system\index.md""#
         );
     }
 }

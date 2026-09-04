@@ -88,9 +88,9 @@ export async function getSessionFiles(id: string): Promise<FileReference[]> {
   return invoke("get_session_files", { id });
 }
 
-export async function collectSessionFiles(id: string, destination: string | undefined, includeWorkspace: boolean): Promise<FileCollectionReport> {
+export async function collectSessionFiles(id: string, destination: string | undefined, includeWorkspace: boolean, originFilter: "user" | "assistant" | "all"): Promise<FileCollectionReport> {
   if (!isDesktop) throw new Error("Dosya paketi yalnızca masaüstü uygulamasında oluşturulabilir.");
-  return invoke("collect_session_files", { id, destination: destination || null, includeWorkspace });
+  return invoke("collect_session_files", { id, destination: destination || null, includeWorkspace, originFilter });
 }
 
 export async function revealPath(path: string): Promise<string> {

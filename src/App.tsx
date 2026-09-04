@@ -16,12 +16,11 @@ import {
   Folder,
   FolderOutput,
   ImageOff,
-  Moon,
+  Palette,
   RefreshCw,
   Search,
   ShieldCheck,
   SlidersHorizontal,
-  Sun,
   Wrench,
   X,
 } from "lucide-react";
@@ -51,6 +50,7 @@ import type {
   CostEstimate,
   DiscoveryReport,
   FileReference,
+  FileCollectionReport,
   FontId,
   ImportProgress,
   PriceSetting,
@@ -73,6 +73,7 @@ type ViewMode = "conversation" | "all" | "prompts" | "responses" | "system" | "t
 type AppMode = "archive" | "usage" | "settings";
 type SessionSort = "newest" | "oldest";
 const PAGE_SIZE = 120;
+const THEME_IDS: ThemeId[] = ["light", "sepia", "coral", "dark", "graphite", "petrol", "plum"];
 
 const MarkdownBody = lazy(() => import("./MarkdownBody").then((module) => ({ default: module.MarkdownBody })));
 const HighlightedJson = lazy(() => import("./MarkdownBody").then((module) => ({ default: module.HighlightedJson })));
@@ -106,7 +107,7 @@ export default function App() {
   const [filesLoading, setFilesLoading] = useState(false);
   const [theme, setTheme] = useState<ThemeId>(() => {
     const saved = localStorage.getItem("contextractor-theme");
-    if (saved === "light" || saved === "dark" || saved === "graphite" || saved === "sepia") return saved;
+    if (THEME_IDS.includes(saved as ThemeId)) return saved as ThemeId;
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   });
   const [fontFamily, setFontFamily] = useState<FontId>(() => {
@@ -394,12 +395,12 @@ export default function App() {
             <button onClick={() => setFontScale((value) => Math.min(1.3, Number((value + .1).toFixed(2))))} disabled={fontScale >= 1.3} aria-label="Yazıyı büyüt">A+</button>
           </div>
           <button
-            className="theme-button"
-            onClick={() => setTheme((current) => current === "light" ? "dark" : current === "dark" ? "graphite" : current === "graphite" ? "sepia" : "light")}
-            aria-label="Temayı değiştir"
-            title="Temayı değiştir"
+            className={appMode === "settings" ? "theme-button active" : "theme-button"}
+            onClick={() => setAppMode("settings")}
+            aria-label="Görünüm ayarlarını aç"
+            title="Tema ve yazı ayarları"
           >
-            {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
+            <Palette size={16} />
           </button>
           <button className="scan-button" onClick={() => void runScan()} disabled={scanning}>
             <RefreshCw size={16} className={scanning ? "spin" : ""} />
@@ -554,7 +555,7 @@ function ProviderRail({
         <BarChart3 size={15} /><span>Kullanım</span>
       </button>
       <button className={appMode === "settings" ? "rail-mode active" : "rail-mode"} onClick={() => onAppMode("settings")}>
-        <SlidersHorizontal size={15} /><span>API fiyatları</span>
+        <SlidersHorizontal size={15} /><span>Ayarlar</span>
       </button>
       <div className="rail-spacer" />
       <div className="archive-location" title={appInfo?.database_path}>
@@ -1070,8 +1071,14 @@ function EvidencePanel({ cost, session, files, filesLoading, open, onClose, onNo
   const confidenceLabel = cost.confidence === "observed" ? "Kaydedilmiş" : cost.confidence === "reconstructed" ? "Yeniden kuruldu" : "Tahmini";
   const [fileFilter, setFileFilter] = useState<"user" | "assistant" | "tool" | "all">("user");
   const [collectionScope, setCollectionScope] = useState<"references" | "workspace">("references");
+  const [collectionOrigin, setCollectionOrigin] = useState<"user" | "assistant" | "all">("user");
   const [collecting, setCollecting] = useState(false);
-  useEffect(() => setFileFilter("user"), [session.id]);
+  const [lastCollection, setLastCollection] = useState<FileCollectionReport | null>(null);
+  useEffect(() => {
+    setFileFilter("user");
+    setCollectionOrigin("user");
+    setLastCollection(null);
+  }, [session.id]);
   const filteredFiles = fileFilter === "all" ? files : files.filter((file) => file.origins.includes(fileFilter));
   const userFiles = filteredFiles.filter((file) => file.origins.includes("user"));
   const modelFiles = filteredFiles.filter((file) => !file.origins.includes("user"));
@@ -1089,9 +1096,9 @@ function EvidencePanel({ cost, session, files, filesLoading, open, onClose, onNo
       const selected = chooseDestination ? await openDialog({ directory: true, multiple: false, title: "Dosya paketinin kaydedileceği klasör" }) : null;
       if (chooseDestination && !selected) return;
       const destination = typeof selected === "string" ? selected : undefined;
-      const report = await collectSessionFiles(session.id, destination, collectionScope === "workspace");
-      onNotice(`${report.copied_files} dosya toplandı · ${report.missing} eksik · ${report.skipped} atlandı`);
-      await revealPath(report.destination);
+      const report = await collectSessionFiles(session.id, destination, collectionScope === "workspace", collectionOrigin);
+      setLastCollection(report);
+      onNotice(`${report.copied_files} dosya toplandı · ${report.duplicates} tekrar tekilleştirildi · ${report.missing} eksik`);
     } catch (error) {
       onNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1181,7 +1188,12 @@ function EvidencePanel({ cost, session, files, filesLoading, open, onClose, onNo
       </div>
       <div className="file-collection-section">
         <div className="file-reference-heading"><span>Dosya paketi</span><small>raporlu kopya</small></div>
-        <p>Bulunan referansları veya çalışma alanının tamamını özgün klasör yapısını koruyarak kopyalar; eksikleri JSON raporuna yazar.</p>
+        <p>Seçtiğin konuşma kaynaklarını veya çalışma alanını özgün klasör yapısıyla kopyalar. Aynı fiziksel dosya yalnız bir kez alınır; eksikler JSON raporuna yazılır.</p>
+        <div className="file-filter-strip collection-origin-strip" aria-label="Dosya paketine dahil edilecek kaynak">
+          {([['user', 'Sen'], ['assistant', 'Asistan'], ['all', 'Tümü']] as const).map(([id, label]) => (
+            <button key={id} className={collectionOrigin === id ? "active" : ""} onClick={() => setCollectionOrigin(id)}>{label}<small>{id === "all" ? "Sen + Asistan" : ""}</small></button>
+          ))}
+        </div>
         <select value={collectionScope} onChange={(event) => setCollectionScope(event.target.value as "references" | "workspace")}>
           <option value="references">Yalnız konuşmada geçen dosyalar</option>
           <option value="workspace" disabled={!session.project_path}>Çalışma alanı + konuşmada geçen dosyalar</option>
@@ -1190,6 +1202,11 @@ function EvidencePanel({ cost, session, files, filesLoading, open, onClose, onNo
           <button className="secondary-button" disabled={collecting} onClick={() => void collectFiles(false)}><Files size={14} /> {collecting ? "Toplanıyor…" : "Exports’a çıkar"}</button>
           <button className="secondary-button" disabled={collecting} onClick={() => void collectFiles(true)}><FolderOutput size={14} /> Konum seç</button>
         </div>
+        {lastCollection && (
+          <button className="collection-result" onClick={() => void openFile(lastCollection.destination)} title={lastCollection.destination}>
+            <Check size={14} /><span><strong>Son paket hazır</strong><small>{lastCollection.copied_files} dosya · klasörde göster</small></span>
+          </button>
+        )}
         <small>En fazla 50.000 dosya / 4 GB; sembolik bağlantılar takip edilmez.</small>
       </div>
       <div className="provenance-seal">
