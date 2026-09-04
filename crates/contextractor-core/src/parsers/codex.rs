@@ -4,6 +4,7 @@ use super::helpers::{
 };
 use super::ParseError;
 use crate::model::{ParsedSession, Provider, Role, SourceCandidate, ToolCall, Turn};
+use serde_json::json;
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -14,6 +15,7 @@ pub fn parse(candidate: &SourceCandidate) -> Result<ParsedSession, ParseError> {
     let mut created_at = None;
     let mut model = None;
     let mut updated_at = None;
+    let mut forked_from_id = None;
     let mut turns = Vec::new();
 
     visit_jsonl(&candidate.path, |value| {
@@ -34,6 +36,7 @@ pub fn parse(candidate: &SourceCandidate) -> Result<ParsedSession, ParseError> {
                     created_at =
                         string(payload, "/timestamp").or_else(|| string(value, "/timestamp"));
                     model = string(payload, "/model");
+                    forked_from_id = string(payload, "/forked_from_id");
                 }
             }
             "turn_context" => {
@@ -74,6 +77,21 @@ pub fn parse(candidate: &SourceCandidate) -> Result<ParsedSession, ParseError> {
         })
         .ok_or_else(|| ParseError::MissingSessionId(candidate.path.display().to_string()))?;
     let title = indexed_title(&candidate.path, &external_id).or_else(|| first_user_title(&turns));
+    let native_user_turn_count = if forked_from_id.is_some() {
+        created_at
+            .as_deref()
+            .and_then(|created| chrono::DateTime::parse_from_rfc3339(created).ok())
+            .map(|created| {
+                turns
+                    .iter()
+                    .filter(|turn| turn.role == Role::User)
+                    .filter(|turn| provider_turn_time(turn).is_some_and(|value| value >= created))
+                    .count()
+            })
+            .unwrap_or_default()
+    } else {
+        turns.iter().filter(|turn| turn.role == Role::User).count()
+    };
 
     Ok(ParsedSession {
         provider: Provider::Codex,
@@ -88,7 +106,14 @@ pub fn parse(candidate: &SourceCandidate) -> Result<ParsedSession, ParseError> {
         archived: candidate.archived,
         summary: None,
         turns,
-        metadata_json: None,
+        metadata_json: Some(
+            json!({
+                "forked_from_id": forked_from_id,
+                "native_user_turn_count": native_user_turn_count,
+                "inherited_fork_snapshot": forked_from_id.is_some() && native_user_turn_count == 0,
+            })
+            .to_string(),
+        ),
     })
 }
 
@@ -107,6 +132,9 @@ fn parse_response_item(payload: &Value, envelope: &Value, turns: &mut Vec<Turn>)
                 role_value = Role::System;
             }
             if !text.trim().is_empty() {
+                let provider_create_time = payload
+                    .pointer("/internal_chat_message_metadata_passthrough/create_time")
+                    .and_then(Value::as_f64);
                 turns.push(Turn {
                     external_id: string(payload, "/id"),
                     ordinal,
@@ -119,7 +147,8 @@ fn parse_response_item(payload: &Value, envelope: &Value, turns: &mut Vec<Turn>)
                     parent_external_id: None,
                     usage: None,
                     tool_calls: Vec::new(),
-                    metadata_json: None,
+                    metadata_json: provider_create_time
+                        .map(|value| json!({ "provider_create_time": value }).to_string()),
                 });
             }
         }
@@ -191,6 +220,15 @@ fn parse_response_item(payload: &Value, envelope: &Value, turns: &mut Vec<Turn>)
     }
 }
 
+fn provider_turn_time(turn: &Turn) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    turn.metadata_json
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        .and_then(|value| value.get("provider_create_time").and_then(Value::as_f64))
+        .and_then(|value| chrono::DateTime::from_timestamp_millis((value * 1000.0) as i64))
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value.to_rfc3339()).ok())
+}
+
 fn indexed_title(source_path: &Path, session_id: &str) -> Option<String> {
     let mut current = source_path.parent();
     let mut index_path = None;
@@ -240,7 +278,7 @@ mod tests {
             concat!(
                 "{\"timestamp\":\"2026-08-21T17:07:05Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"child-id\",\"cwd\":\"E:\\\\trace analysis\"}}\n",
                 "{\"timestamp\":\"2026-08-20T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"parent-id\",\"cwd\":\"E:\\\\old\"}}\n",
-                "{\"timestamp\":\"2026-08-21T17:08:00Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Continue the fork\"}]}}\n"
+                "{\"timestamp\":\"2026-08-21T17:08:00Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Continue the fork\"}],\"internal_chat_message_metadata_passthrough\":{\"create_time\":1787332080.0}}}\n"
             ),
         )
         .unwrap();
@@ -261,5 +299,55 @@ mod tests {
         assert_eq!(parsed.external_id, "child-id");
         assert_eq!(parsed.project_path.as_deref(), Some("E:\\trace analysis"));
         assert_eq!(parsed.title.as_deref(), Some("Trace Branch"));
+        assert_eq!(
+            parsed
+                .metadata_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                .and_then(|value| value
+                    .get("inherited_fork_snapshot")
+                    .and_then(Value::as_bool)),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn inherited_fork_without_a_new_user_turn_is_marked_as_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let sessions = root.join("sessions").join("2026").join("08").join("21");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let path = sessions.join("rollout-child.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"timestamp\":\"2026-08-21T17:07:02Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"child-id\",\"forked_from_id\":\"parent-id\",\"timestamp\":\"2026-08-21T17:07:01Z\",\"cwd\":\"E:\\\\trace analysis\"}}\n",
+                "{\"timestamp\":\"2026-08-20T10:00:00Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Inherited prompt\"}]}}\n"
+            ),
+        )
+        .unwrap();
+        let candidate = SourceCandidate {
+            provider: Provider::Codex,
+            kind: SourceKind::CodexRollout,
+            path,
+            archived: true,
+            modified_at_ms: None,
+            size_bytes: 1,
+        };
+        let parsed = parse(&candidate).unwrap();
+        let metadata: Value =
+            serde_json::from_str(parsed.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            metadata
+                .get("inherited_fork_snapshot")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            metadata
+                .get("native_user_turn_count")
+                .and_then(Value::as_u64),
+            Some(0)
+        );
     }
 }

@@ -177,6 +177,7 @@ export interface FileReference {
   path: string;
   exists: boolean;
   is_image: boolean;
+  origins: Array<"user" | "assistant" | "tool" | "system" | "unknown">;
 }
 
 export interface UsageCostRow {

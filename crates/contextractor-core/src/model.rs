@@ -214,6 +214,7 @@ pub struct FileReference {
     pub path: String,
     pub exists: bool,
     pub is_image: bool,
+    pub origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

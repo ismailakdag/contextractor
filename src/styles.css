@@ -389,12 +389,18 @@ button.image-fallback:hover { border-color: var(--cobalt); color: var(--ink); }
 .source-reference-section { display: grid; gap: 6px; }
 .file-reference-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; color: var(--muted); font-size: 9px; font-weight: 640; letter-spacing: .06em; text-transform: uppercase; }
 .file-reference-heading small { color: var(--faint); font-size: 8px; font-weight: 500; }
+.file-reference-groups { display: grid; gap: 14px; }
+.file-reference-group { display: grid; gap: 6px; }
+.file-reference-group > header { display: flex; justify-content: space-between; align-items: center; color: var(--faint); font-size: 8px; letter-spacing: .02em; }
+.file-reference-group > header small { font-size: 7px; font-variant-numeric: tabular-nums; }
 .file-reference-list { display: grid; gap: 5px; }
 .file-reference { display: grid; grid-template-columns: auto minmax(0,1fr); align-items: center; gap: 2px 8px; width: 100%; padding: 8px; border: 1px solid var(--rule); border-radius: 6px; background: var(--paper); color: var(--muted); text-align: left; cursor: pointer; }
 .file-reference:hover { border-color: var(--cobalt); color: var(--cobalt); }
-.file-reference svg { grid-row: 1 / span 2; }
-.file-reference span { overflow: hidden; color: var(--ink); font-size: 9px; font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
+.file-reference svg { grid-row: 1 / span 3; }
+.file-reference > span:not(.file-origin-row) { overflow: hidden; color: var(--ink); font-size: 9px; font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
 .file-reference small { color: var(--faint); font-size: 7px; }
+.file-origin-row { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; }
+.file-origin-row i { padding: 1px 4px; border-radius: 3px; background: var(--subtle); color: var(--muted); font-size: 6px; font-style: normal; font-weight: 650; letter-spacing: .03em; text-transform: uppercase; }
 .file-reference.missing { border-style: dashed; }
 .file-reference.missing:hover { border-color: var(--danger); color: var(--danger); }
 .file-reference-loading, .file-reference-empty { margin: 0; color: var(--faint); font-size: 8px; line-height: 1.5; }

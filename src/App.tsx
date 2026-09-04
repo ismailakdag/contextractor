@@ -1047,6 +1047,8 @@ function ToolRecord({ tool, sessionId, turnOrdinal, toolOrdinal, projectPath }: 
 
 function EvidencePanel({ cost, session, files, filesLoading, open, onClose, onNotice }: { cost: CostEstimate; session: SessionListItem; files: FileReference[]; filesLoading: boolean; open: boolean; onClose: () => void; onNotice: (message: string) => void }) {
   const confidenceLabel = cost.confidence === "observed" ? "Kaydedilmiş" : cost.confidence === "reconstructed" ? "Yeniden kuruldu" : "Tahmini";
+  const userFiles = files.filter((file) => file.origins.includes("user"));
+  const modelFiles = files.filter((file) => !file.origins.includes("user"));
   const openFile = async (path: string) => {
     try {
       const opened = await revealPath(path);
@@ -1117,14 +1119,9 @@ function EvidencePanel({ cost, session, files, filesLoading, open, onClose, onNo
         {filesLoading ? (
           <div className="file-reference-loading">Dosya referansları taranıyor…</div>
         ) : files.length ? (
-          <div className="file-reference-list">
-            {files.map((file) => (
-              <button key={file.path} className={file.exists ? "file-reference" : "file-reference missing"} onClick={() => void openFile(file.path)} title={file.exists ? file.path : `Silinmiş dosya · ${file.path}`}>
-                {file.is_image && !file.exists ? <ImageOff size={14} /> : <FileText size={14} />}
-                <span>{file.path.split(/[\\/]/).filter(Boolean).at(-1) || file.path}</span>
-                <small>{file.exists ? "Klasörde göster" : "Silinmiş · önceki konumunu görmek için tıkla"}</small>
-              </button>
-            ))}
+          <div className="file-reference-groups">
+            <FileReferenceGroup label="Senin etiketlediklerin" files={userFiles} onOpen={openFile} />
+            <FileReferenceGroup label="Model ve araç kayıtları" files={modelFiles} onOpen={openFile} />
           </div>
         ) : (
           <p className="file-reference-empty">Bu oturumda mutlak dosya referansı bulunamadı.</p>
@@ -1136,6 +1133,31 @@ function EvidencePanel({ cost, session, files, filesLoading, open, onClose, onNo
       </div>
     </aside>
   );
+}
+
+function FileReferenceGroup({ label, files, onOpen }: { label: string; files: FileReference[]; onOpen: (path: string) => Promise<void> }) {
+  if (!files.length) return null;
+  return (
+    <section className="file-reference-group">
+      <header><span>{label}</span><small>{files.length}</small></header>
+      <div className="file-reference-list">
+        {files.map((file) => (
+          <button key={file.path} className={file.exists ? "file-reference" : "file-reference missing"} onClick={() => void onOpen(file.path)} title={file.exists ? file.path : `Silinmiş dosya · ${file.path}`}>
+            {file.is_image && !file.exists ? <ImageOff size={14} /> : <FileText size={14} />}
+            <span>{file.path.split(/[\\/]/).filter(Boolean).at(-1) || file.path}</span>
+            <small>{file.exists ? "Klasörde göster" : "Silinmiş · önceki konumu göster"}</small>
+            <span className="file-origin-row">
+              {file.origins.map((origin) => <i key={origin}>{fileOriginLabel(origin)}</i>)}
+            </span>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function fileOriginLabel(origin: FileReference["origins"][number]) {
+  return { user: "Sen", assistant: "Asistan", tool: "Araç", system: "Sistem", unknown: "Kayıt" }[origin];
 }
 
 function PathReference({ icon, label, path, onOpen }: { icon: ReactNode; label: string; path: string; onOpen: (path: string) => Promise<void> }) {

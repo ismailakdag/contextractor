@@ -6,7 +6,7 @@ use crate::model::{ParsedSession, Provider, Role, SourceCandidate, ToolCall, Tur
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 pub fn parse(candidate: &SourceCandidate) -> Result<ParsedSession, ParseError> {
@@ -85,8 +85,14 @@ pub fn parse(candidate: &SourceCandidate) -> Result<ParsedSession, ParseError> {
                 .or_else(|| string(value, "/recap"))
         }),
         turns,
-        metadata_json: source_turn_count
-            .map(|count| json!({ "source_turn_count": count }).to_string()),
+        metadata_json: summary.as_ref().map(|value| {
+            json!({
+                "source_turn_count": source_turn_count,
+                "session_kind": string(value, "/session_kind"),
+                "agent_name": string(value, "/agent_name"),
+            })
+            .to_string()
+        }),
     })
 }
 
@@ -141,6 +147,14 @@ fn parse_event(value: &Value, turns: &mut Vec<Turn>, model: &mut Option<String>)
         *model = string(value, "/model_id");
     }
     if !text.trim().is_empty() || !tool_calls.is_empty() {
+        let prompt_index = value
+            .get("prompt_index")
+            .and_then(Value::as_i64)
+            .or_else(|| {
+                value
+                    .pointer("/content/0/prompt_index")
+                    .and_then(Value::as_i64)
+            });
         turns.push(Turn {
             external_id: string(value, "/id"),
             ordinal: turns.len() as i64,
@@ -164,7 +178,8 @@ fn parse_event(value: &Value, turns: &mut Vec<Turn>, model: &mut Option<String>)
             parent_external_id: None,
             usage: None,
             tool_calls,
-            metadata_json: None,
+            metadata_json: prompt_index
+                .map(|index| json!({ "provider_prompt_index": index }).to_string()),
         });
     }
 }
@@ -279,13 +294,26 @@ fn enrich_turn_timestamps(candidate: &SourceCandidate, turns: &mut [Turn]) {
     if !path.is_file() {
         return;
     }
-    let mut started = Vec::new();
-    let mut ended = Vec::new();
+    let mut started = HashMap::new();
+    let mut ended = HashMap::new();
+    let mut started_in_order = Vec::new();
+    let mut ended_in_order = Vec::new();
     if visit_jsonl(&path, |value| {
         let timestamp = string(value, "/ts");
+        let turn_number = value.get("turn_number").and_then(Value::as_i64);
         match value.get("type").and_then(Value::as_str) {
-            Some("turn_started") => started.push(timestamp),
-            Some("turn_ended") => ended.push(timestamp),
+            Some("turn_started") => {
+                if let Some(number) = turn_number {
+                    started.insert(number, timestamp.clone());
+                }
+                started_in_order.push(timestamp);
+            }
+            Some("turn_ended") => {
+                if let Some(number) = turn_number {
+                    ended.insert(number, timestamp.clone());
+                }
+                ended_in_order.push(timestamp);
+            }
             _ => {}
         }
     })
@@ -294,20 +322,35 @@ fn enrich_turn_timestamps(candidate: &SourceCandidate, turns: &mut [Turn]) {
         return;
     }
     let mut interaction = None;
+    let mut sequential_interaction = None;
     for turn in turns {
         if turn.role == Role::User {
-            let index = interaction.map_or(0, |value: usize| value + 1);
-            interaction = Some(index);
+            let fallback_index = sequential_interaction.map_or(0, |value: usize| value + 1);
+            sequential_interaction = Some(fallback_index);
+            let provider_index = turn
+                .metadata_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                .and_then(|value| value.get("provider_prompt_index").and_then(Value::as_i64));
+            interaction = provider_index;
             if turn.created_at.is_none() {
-                turn.created_at = started.get(index).cloned().flatten();
+                turn.created_at = provider_index
+                    .and_then(|index| started.get(&index).cloned().flatten())
+                    .or_else(|| started_in_order.get(fallback_index).cloned().flatten());
             }
         } else if turn.created_at.is_none() {
             if let Some(index) = interaction {
                 turn.created_at = ended
+                    .get(&index)
+                    .cloned()
+                    .flatten()
+                    .or_else(|| started.get(&index).cloned().flatten());
+            } else if let Some(index) = sequential_interaction {
+                turn.created_at = ended_in_order
                     .get(index)
                     .cloned()
                     .flatten()
-                    .or_else(|| started.get(index).cloned().flatten());
+                    .or_else(|| started_in_order.get(index).cloned().flatten());
             }
         }
     }
@@ -359,6 +402,48 @@ mod tests {
         assert_eq!(
             parsed.turns[1].created_at.as_deref(),
             Some("2026-08-07T09:49:11.000Z")
+        );
+    }
+
+    #[test]
+    fn matches_grok_times_by_provider_prompt_index_after_recap_gaps() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_dir = temp.path().join("project").join("session-id");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let history = session_dir.join("chat_history.jsonl");
+        std::fs::write(
+            &history,
+            concat!(
+                "{\"type\":\"user\",\"content\":\"older visible prompt\",\"prompt_index\":7}\n",
+                "{\"type\":\"assistant\",\"content\":\"answer\"}\n",
+                "{\"type\":\"user\",\"content\":\"latest prompt\",\"prompt_index\":332}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            session_dir.join("events.jsonl"),
+            concat!(
+                "{\"ts\":\"2026-08-07T09:48:09Z\",\"type\":\"turn_started\",\"turn_number\":7}\n",
+                "{\"ts\":\"2026-09-04T14:19:55Z\",\"type\":\"turn_started\",\"turn_number\":332}\n"
+            ),
+        )
+        .unwrap();
+        let candidate = SourceCandidate {
+            provider: Provider::Grok,
+            kind: SourceKind::GrokCliHistory,
+            path: history,
+            archived: false,
+            modified_at_ms: None,
+            size_bytes: 1,
+        };
+        let parsed = parse(&candidate).unwrap();
+        assert_eq!(
+            parsed.turns[0].created_at.as_deref(),
+            Some("2026-08-07T09:48:09Z")
+        );
+        assert_eq!(
+            parsed.turns[2].created_at.as_deref(),
+            Some("2026-09-04T14:19:55Z")
         );
     }
 }

@@ -186,6 +186,9 @@ function resolveLocalPath(value: string, basePath?: string) {
   } catch {
     // Keep the literal reference visible when a provider emitted malformed URI escapes.
   }
+  // Codex renders absolute Windows links as </E:/...>. The leading slash is
+  // Markdown syntax, not part of the Windows path.
+  if (/^\/[a-zA-Z]:[\\/]/.test(decoded)) decoded = decoded.slice(1);
   const cleaned = decoded.replace(/\//g, "\\");
   if (/^[a-zA-Z]:\\/.test(cleaned) || cleaned.startsWith("\\\\") || !basePath) return cleaned;
   return `${basePath.replace(/[\\/]+$/, "")}\\${cleaned.replace(/^[\\/]+/, "")}`;

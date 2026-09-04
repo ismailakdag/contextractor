@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
+const CATALOG_SESSION_FILTER: &str = "EXISTS(SELECT 1 FROM turns visible WHERE visible.session_id=s.id AND visible.role IN ('user','assistant') AND trim(visible.text)<>'') AND (s.provider<>'codex' OR EXISTS(SELECT 1 FROM turns prompt WHERE prompt.session_id=s.id AND prompt.role='user' AND trim(prompt.text)<>'')) AND COALESCE(json_extract(s.metadata_json, '$.session_kind'), 'primary') NOT IN ('subagent','worker') AND COALESCE(CAST(json_extract(s.metadata_json, '$.inherited_fork_snapshot') AS INTEGER), 0)=0";
 
 pub struct Archive {
     connection: Connection,
@@ -396,7 +397,8 @@ impl Archive {
             "#,
             )
         };
-        sql.push_str(" WHERE EXISTS(SELECT 1 FROM turns visible WHERE visible.session_id=s.id AND visible.role IN ('user','assistant') AND trim(visible.text)<>'') AND (s.provider<>'codex' OR EXISTS(SELECT 1 FROM turns prompt WHERE prompt.session_id=s.id AND prompt.role='user' AND trim(prompt.text)<>''))");
+        sql.push_str(" WHERE ");
+        sql.push_str(CATALOG_SESSION_FILTER);
         if has_search {
             if provider.is_some() {
                 sql.push_str(" AND s.provider=?3");
@@ -556,9 +558,10 @@ impl Archive {
     }
 
     pub fn provider_counts(&self) -> rusqlite::Result<Vec<(String, i64)>> {
-        let mut statement = self.connection.prepare(
-            "SELECT s.provider, COUNT(*) FROM sessions s WHERE EXISTS(SELECT 1 FROM turns t WHERE t.session_id=s.id AND t.role IN ('user','assistant') AND trim(t.text)<>'') AND (s.provider<>'codex' OR EXISTS(SELECT 1 FROM turns prompt WHERE prompt.session_id=s.id AND prompt.role='user' AND trim(prompt.text)<>'')) GROUP BY s.provider ORDER BY s.provider",
-        )?;
+        let sql = format!(
+            "SELECT s.provider, COUNT(*) FROM sessions s WHERE {CATALOG_SESSION_FILTER} GROUP BY s.provider ORDER BY s.provider"
+        );
+        let mut statement = self.connection.prepare(&sql)?;
         let result = statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect();
@@ -809,24 +812,59 @@ impl Archive {
         // turn so they cannot be mistaken for chat attachments.
         let mut texts = Vec::new();
         let mut statement = self.connection.prepare(
-            "SELECT text, metadata_json FROM turns WHERE session_id=?1 ORDER BY ordinal",
+            "SELECT role, text, metadata_json FROM turns WHERE session_id=?1 ORDER BY ordinal",
         )?;
         let rows = statement.query_map([session_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
         })?;
         for row in rows {
-            let (text, metadata) = row?;
-            texts.push(text);
+            let (role, text, metadata) = row?;
+            let origin = match role.as_str() {
+                "user" => "user",
+                "assistant" | "reasoning" => "assistant",
+                "tool" => "tool",
+                "system" => "system",
+                _ => "unknown",
+            };
+            texts.push((text, origin));
             if let Some(metadata) = metadata {
-                texts.push(metadata);
+                texts.push((metadata, origin));
             }
         }
 
-        let mut seen = std::collections::HashSet::new();
+        let mut tool_statement = self.connection.prepare(
+            "SELECT tc.arguments_json, tc.result_text FROM tool_calls tc JOIN turns t ON t.id=tc.turn_id WHERE tc.session_id=?1 ORDER BY t.ordinal, tc.ordinal",
+        )?;
+        let tool_rows = tool_statement.query_map([session_id], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })?;
+        for row in tool_rows {
+            let (arguments, result) = row?;
+            if let Some(arguments) = arguments {
+                texts.push((arguments, "tool"));
+            }
+            if let Some(result) = result {
+                texts.push((result, "tool"));
+            }
+        }
+
+        let mut seen = std::collections::HashMap::new();
         let mut paths = Vec::new();
-        for text in texts {
+        for (text, origin) in texts {
             for path in extract_file_paths(&text) {
-                if !seen.insert(path.to_ascii_lowercase()) {
+                let key = path.to_ascii_lowercase();
+                if let Some(index) = seen.get(&key).copied() {
+                    let reference: &mut FileReference = &mut paths[index];
+                    if !reference.origins.iter().any(|value| value == origin) {
+                        reference.origins.push(origin.to_string());
+                    }
                     continue;
                 }
                 let file_path = std::path::Path::new(&path);
@@ -843,7 +881,9 @@ impl Archive {
                         extension.as_str(),
                         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "avif"
                     ),
+                    origins: vec![origin.to_string()],
                 });
+                seen.insert(key, paths.len() - 1);
                 if paths.len() >= 100 {
                     return Ok(paths);
                 }
@@ -867,7 +907,7 @@ impl Archive {
                      (SELECT COUNT(*) FROM tool_calls tc WHERE tc.session_id=s.id) tool_calls,
                      COALESCE((SELECT MAX(total_tokens) FROM usage_events u WHERE u.session_id=s.id), 0) total_tokens,
                      substr(COALESCE(s.updated_at, s.created_at, s.imported_at), 1, 10) active_date
-              FROM sessions s
+              FROM sessions s WHERE {CATALOG_SESSION_FILTER}
             )
             SELECT provider, COUNT(*), SUM(prompts), SUM(assistant_turns), SUM(tool_calls),
                    SUM(total_tokens), COUNT(DISTINCT active_date),
@@ -913,7 +953,7 @@ impl Archive {
                      CASE WHEN t.role='assistant' THEN 1 ELSE 0 END assistant_turns,
                      (SELECT COUNT(*) FROM tool_calls tc WHERE tc.turn_id=t.id) tool_calls,
                      COALESCE((SELECT total_tokens FROM usage_events u WHERE u.turn_id=t.id LIMIT 1), 0) total_tokens
-              FROM turns t JOIN sessions s ON s.id=t.session_id WHERE 1=1{day_filter}
+              FROM turns t JOIN sessions s ON s.id=t.session_id WHERE {CATALOG_SESSION_FILTER}{day_filter}
             )
             SELECT day, provider, COUNT(DISTINCT session_id), SUM(prompts), SUM(assistant_turns), SUM(tool_calls), SUM(total_tokens)
             FROM turn_activity WHERE day IS NOT NULL AND length(day)=10
@@ -947,13 +987,17 @@ impl Archive {
             .max_by_key(|day| day.prompts + day.tool_calls);
 
         let tool_sql = if provider.is_some() {
-            r#"SELECT s.provider, tc.name, COUNT(*) calls
+            &format!(
+                r#"SELECT s.provider, tc.name, COUNT(*) calls
                FROM tool_calls tc JOIN sessions s ON s.id=tc.session_id
-               WHERE s.provider=?1 GROUP BY s.provider, tc.name ORDER BY calls DESC LIMIT 40"#
+               WHERE {CATALOG_SESSION_FILTER} AND s.provider=?1 GROUP BY s.provider, tc.name ORDER BY calls DESC LIMIT 40"#
+            )
         } else {
-            r#"SELECT s.provider, tc.name, COUNT(*) calls
+            &format!(
+                r#"SELECT s.provider, tc.name, COUNT(*) calls
                FROM tool_calls tc JOIN sessions s ON s.id=tc.session_id
-               GROUP BY s.provider, tc.name ORDER BY calls DESC LIMIT 40"#
+               WHERE {CATALOG_SESSION_FILTER} GROUP BY s.provider, tc.name ORDER BY calls DESC LIMIT 40"#
+            )
         };
         let mut tool_statement = self.connection.prepare(tool_sql)?;
         let tool_mapper = |row: &rusqlite::Row<'_>| {
@@ -974,9 +1018,9 @@ impl Archive {
         };
 
         let model_filter = if provider.is_some() {
-            " WHERE s.provider=?1"
+            format!(" WHERE {CATALOG_SESSION_FILTER} AND s.provider=?1")
         } else {
-            ""
+            format!(" WHERE {CATALOG_SESSION_FILTER}")
         };
         let model_sql = format!(
             r#"SELECT s.provider, COALESCE(NULLIF(s.model,''), 'Bilinmiyor'), COUNT(*),
@@ -1357,17 +1401,29 @@ fn collect_json_paths(value: &serde_json::Value, paths: &mut Vec<String>) {
 }
 
 fn normalize_file_path(value: &str) -> Option<String> {
-    let value = value
-        .trim()
-        .trim_matches(['"', '\'', '<', '>'])
+    let mut value = value.trim().trim_matches(['"', '\'', '<', '>']);
+    value = value
         .strip_prefix("file:///")
-        .or_else(|| value.trim().strip_prefix("file://"))
-        .unwrap_or(value.trim());
+        .or_else(|| value.strip_prefix("file://"))
+        .unwrap_or(value);
+    if value.starts_with('/')
+        && value.as_bytes().get(2) == Some(&b':')
+        && matches!(value.as_bytes().get(3), Some(b'\\' | b'/'))
+    {
+        value = &value[1..];
+    }
     let looks_windows = value.len() > 3
         && value.as_bytes().get(1) == Some(&b':')
         && matches!(value.as_bytes().get(2), Some(b'\\' | b'/'));
     let looks_unix = value.starts_with('/') && !value.starts_with("//");
-    (looks_windows || looks_unix).then(|| value.replace("\\\\", "\\"))
+    (looks_windows || looks_unix).then(|| {
+        let normalized = value.replace("\\\\", "\\");
+        if looks_windows {
+            normalized.replace('/', "\\")
+        } else {
+            normalized
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1571,6 +1627,67 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(archive.provider_counts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn provider_subagents_and_inherited_fork_snapshots_stay_out_of_the_catalog() {
+        let mut archive = Archive::in_memory().unwrap();
+        let mut subagent = session();
+        subagent.provider = Provider::Grok;
+        subagent.external_id = "subagent".into();
+        subagent.metadata_json = Some(r#"{"session_kind":"subagent"}"#.into());
+        archive
+            .import_session(&subagent, "subagent", 10, Some(1))
+            .unwrap();
+
+        let mut inherited_fork = session();
+        inherited_fork.external_id = "fork".into();
+        inherited_fork.metadata_json = Some(r#"{"inherited_fork_snapshot":true}"#.into());
+        archive
+            .import_session(&inherited_fork, "fork", 10, Some(1))
+            .unwrap();
+
+        assert!(archive.list_sessions(None, None, 10).unwrap().is_empty());
+        assert!(archive.provider_counts().unwrap().is_empty());
+        assert_eq!(archive.usage_analytics(None).unwrap().total_sessions, 0);
+    }
+
+    #[test]
+    fn file_references_keep_user_and_model_provenance() {
+        let mut archive = Archive::in_memory().unwrap();
+        let mut parsed = session();
+        parsed.turns[0].text = r#"Use E:\Obsidian Vaults\Trace Analysis\system\index.md"#.into();
+        parsed.turns.push(Turn {
+            external_id: Some("assistant-path".into()),
+            ordinal: 1,
+            prompt_ordinal: None,
+            role: Role::Assistant,
+            created_at: None,
+            text: r#"Saved [index](</E:/Obsidian Vaults/Trace Analysis/system/index.md>)"#.into(),
+            event_type: Some("message".into()),
+            model: None,
+            parent_external_id: None,
+            usage: None,
+            tool_calls: vec![ToolCall {
+                external_id: None,
+                name: "read_file".into(),
+                arguments_json: Some(r#"{"path":"E:\\trace analysis\\workflow.md"}"#.into()),
+                result_text: None,
+                status: Some("completed".into()),
+                duration_ms: None,
+            }],
+            metadata_json: None,
+        });
+        let id = archive
+            .import_session(&parsed, "origins", 10, Some(1))
+            .unwrap();
+        let references = archive.session_file_references(&id).unwrap();
+        assert_eq!(
+            references[0].path,
+            r"E:\Obsidian Vaults\Trace Analysis\system\index.md"
+        );
+        assert_eq!(references[0].origins, vec!["user", "assistant"]);
+        assert_eq!(references[1].origins, vec!["tool"]);
     }
 
     #[test]
