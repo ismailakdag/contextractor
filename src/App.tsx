@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { save } from "@tauri-apps/plugin-dialog";
 import {
@@ -9,7 +9,6 @@ import {
   BarChart3,
   Check,
   ChevronDown,
-  Copy,
   Database,
   Download,
   FileText,
@@ -40,6 +39,7 @@ import {
   scanSources,
 } from "./bridge";
 import { applyPriceOverride, loadPrices, savePrices } from "./prices";
+import { CopyAction } from "./CopyAction";
 import { SettingsView } from "./SettingsView";
 import { UsageView } from "./UsageView";
 import { cleanDisplayText } from "./text";
@@ -60,7 +60,7 @@ const providerMeta = {
   codex: { label: "Codex", mark: "CX" },
   claude: { label: "Claude", mark: "CL" },
   grok: { label: "Grok", mark: "GK" },
-  antigravity: { label: "Antigravity", mark: "AG" },
+  antigravity: { label: "AGY", mark: "AG" },
 } as const;
 
 type ProviderFilter = keyof typeof providerMeta | "all";
@@ -170,7 +170,32 @@ export default function App() {
     setLoadedSearch("");
     setTurnOffset(0);
     void getSession(selectedId)
-      .then((session) => active && setDetail(session))
+      .then(async (session) => {
+        if (!active) return;
+        if (!session) {
+          setDetail(null);
+          return;
+        }
+        if (session.total_turns <= PAGE_SIZE) {
+          setTurnOffset(0);
+          setDetail(session);
+          return;
+        }
+
+        // Conversation inspectors are most useful at the live edge. Fetch the
+        // last bounded page on open; older history remains available through
+        // the explicit "previous records" control and the top jump.
+        const offset = Math.max(0, session.total_turns - PAGE_SIZE);
+        const page = await getSessionTurns(selectedId, "conversation", offset, PAGE_SIZE, "");
+        if (!active) return;
+        setTurnOffset(page.offset);
+        setDetail({
+          ...session,
+          data: { ...session.data, turns: page.turns },
+          total_turns: page.total,
+          has_more: page.has_more,
+        });
+      })
       .catch((error) => active && setNotice(String(error)));
     void getSessionFiles(selectedId)
       .then((files) => active && setSessionFiles(files))
@@ -238,6 +263,26 @@ export default function App() {
     try {
       const page = await getSessionTurns(selectedId, loadedMode, turnOffset + detail.data.turns.length, PAGE_SIZE, loadedSearch);
       setDetail((current) => current ? { ...current, data: { ...current.data, turns: [...current.data.turns, ...page.turns] }, total_turns: page.total, has_more: page.has_more } : current);
+    } catch (error) {
+      setNotice(String(error));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  const loadPreviousTurns = async () => {
+    if (!selectedId || !detail || loadingMore || turnOffset <= 0) return;
+    setLoadingMore(true);
+    try {
+      const nextOffset = Math.max(0, turnOffset - PAGE_SIZE);
+      const page = await getSessionTurns(selectedId, loadedMode, nextOffset, turnOffset - nextOffset, loadedSearch);
+      setTurnOffset(page.offset);
+      setDetail((current) => current ? {
+        ...current,
+        data: { ...current.data, turns: [...page.turns, ...current.data.turns] },
+        total_turns: page.total,
+        has_more: turnOffset + current.data.turns.length < page.total,
+      } : current);
     } catch (error) {
       setNotice(String(error));
     } finally {
@@ -390,7 +435,7 @@ export default function App() {
         />
         {appMode === "archive" ? <>
           <SessionCatalog sessions={sortedSessions} selectedId={selectedId} search={search} sort={sessionSort} onSort={setSessionSort} onSelect={setSelectedId} onMove={moveSelection} />
-          <Inspector detail={detail} prices={prices} files={sessionFiles} filesLoading={filesLoading} showEmpty={discovery !== null && sessions.length === 0} search={search.trim()} viewMode={viewMode} turnLoading={turnLoading} loadingMore={loadingMore} jumpLoading={jumpLoading} onLoadMore={() => void loadMoreTurns()} onJump={jumpTurns} onViewMode={setViewMode} onNotice={setNotice} />
+          <Inspector detail={detail} prices={prices} files={sessionFiles} filesLoading={filesLoading} showEmpty={discovery !== null && sessions.length === 0} search={search.trim()} viewMode={viewMode} turnOffset={turnOffset} turnLoading={turnLoading} loadingMore={loadingMore} jumpLoading={jumpLoading} onLoadMore={() => void loadMoreTurns()} onLoadPrevious={() => void loadPreviousTurns()} onJump={jumpTurns} onViewMode={setViewMode} onNotice={setNotice} />
         </> : appMode === "usage" ? (
           <UsageView
             provider={provider === "all" ? undefined : provider}
@@ -597,10 +642,12 @@ function Inspector({
   showEmpty,
   search,
   viewMode,
+  turnOffset,
   turnLoading,
   loadingMore,
   jumpLoading,
   onLoadMore,
+  onLoadPrevious,
   onJump,
   onViewMode,
   onNotice,
@@ -612,10 +659,12 @@ function Inspector({
   showEmpty: boolean;
   search: string;
   viewMode: ViewMode;
+  turnOffset: number;
   turnLoading: boolean;
   loadingMore: boolean;
   jumpLoading: boolean;
   onLoadMore: () => void;
+  onLoadPrevious: () => void;
   onJump: (edge: "start" | "end") => Promise<void>;
   onViewMode: (mode: ViewMode) => void;
   onNotice: (message: string) => void;
@@ -669,6 +718,14 @@ function Inspector({
       onNotice(error instanceof Error ? error.message : String(error));
     }
   };
+  const showPath = async (path: string) => {
+    try {
+      const opened = await revealPath(path);
+      onNotice(opened === path ? `Klasörde gösterildi · ${path}` : `En yakın konum açıldı · ${opened}`);
+    } catch (error) {
+      onNotice(String(error));
+    }
+  };
 
   return (
     <section className="inspector" aria-label="Seçili oturum">
@@ -684,9 +741,9 @@ function Inspector({
             <h2>{data.session.title}</h2>
             <div className="session-context">
               {data.session.project_path && (
-                <span title={data.session.project_path}>
+                <button className="session-path-button" onClick={() => void showPath(data.session.project_path!)} title={`${data.session.project_path} · klasörde göster`}>
                   <Folder size={14} /> {data.session.project_path}
-                </span>
+                </button>
               )}
               {data.session.model && <span>{data.session.model}</span>}
               <span>{formatDate(data.session.updated_at || data.session.created_at, true)}</span>
@@ -759,27 +816,36 @@ function Inspector({
       </header>
 
       <div className="inspector-body">
-        <Transcript session={data} mode={viewMode} search={search} loading={turnLoading} hasMore={detail.has_more} total={detail.total_turns} loadingMore={loadingMore} jumpLoading={jumpLoading} onLoadMore={onLoadMore} onJump={onJump} />
+        <Transcript session={data} mode={viewMode} search={search} loading={turnLoading} offset={turnOffset} hasMore={detail.has_more} total={detail.total_turns} loadingMore={loadingMore} jumpLoading={jumpLoading} onLoadMore={onLoadMore} onLoadPrevious={onLoadPrevious} onJump={onJump} />
         <EvidencePanel cost={cost} session={data.session} files={files} filesLoading={filesLoading} open={evidenceOpen} onClose={() => setEvidenceOpen(false)} onNotice={onNotice} />
       </div>
     </section>
   );
 }
 
-function Transcript({ session, mode, search, loading, hasMore, total, loadingMore, jumpLoading, onLoadMore, onJump }: { session: SessionDetail["data"]; mode: ViewMode; search: string; loading: boolean; hasMore: boolean; total: number; loadingMore: boolean; jumpLoading: boolean; onLoadMore: () => void; onJump: (edge: "start" | "end") => Promise<void> }) {
+function Transcript({ session, mode, search, loading, offset, hasMore, total, loadingMore, jumpLoading, onLoadMore, onLoadPrevious, onJump }: { session: SessionDetail["data"]; mode: ViewMode; search: string; loading: boolean; offset: number; hasMore: boolean; total: number; loadingMore: boolean; jumpLoading: boolean; onLoadMore: () => void; onLoadPrevious: () => void; onJump: (edge: "start" | "end") => Promise<void> }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const spineRef = useRef<HTMLDivElement>(null);
   const loadRef = useRef<HTMLDivElement>(null);
   const pendingJump = useRef<"start" | "end" | null>(null);
+  const positionedSession = useRef<string | null>(null);
   const turns = useMemo(() => {
     return session.turns;
   }, [session.turns, mode]);
   const virtualizer = useVirtualizer({
     count: mode === "summary" ? 0 : turns.length,
     getScrollElement: () => parentRef.current,
+    getItemKey: (index) => `${turns[index].ordinal}-${turns[index].external_id || "turn"}`,
     estimateSize: (index) => Math.min(420, 112 + turns[index].text.length * 0.09 + turns[index].tool_calls.length * 72),
     overscan: 5,
   });
+
+  useEffect(() => {
+    const positionKey = `${session.session.id}:${mode}:${search}`;
+    if (positionedSession.current === positionKey || !turns.length) return;
+    positionedSession.current = positionKey;
+    pendingJump.current = offset > 0 ? "end" : "start";
+  }, [session.session.id, mode, search, offset, turns.length]);
 
   useEffect(() => {
     const edge = pendingJump.current;
@@ -836,8 +902,11 @@ function Transcript({ session, mode, search, loading, hasMore, total, loadingMor
   if (mode === "summary") {
     return (
       <div className="transcript-scroll summary-view" key="summary">
-        <FileText size={20} />
-        <h3>Oturum özeti</h3>
+        <div className="summary-title-row">
+          <FileText size={20} />
+          <h3>Oturum özeti</h3>
+          <CopyAction value={session.summary || ""} title="Özeti kopyala" />
+        </div>
         <p>{session.summary || "Bu kaynağın içinde kayıtlı bir özet bulunmuyor."}</p>
         <dl className="summary-facts">
           <div><dt>Tur</dt><dd>{session.session.turn_count}</dd></div>
@@ -868,6 +937,14 @@ function Transcript({ session, mode, search, loading, hasMore, total, loadingMor
         <button onClick={() => void jump("start")} disabled={jumpLoading} title="Konuşmanın en başına git"><ArrowUp size={15} /><span>En üst</span></button>
         <button onClick={() => void jump("end")} disabled={jumpLoading} title="Konuşmanın en sonuna git"><ArrowDown size={15} /><span>En alt</span></button>
       </nav>
+      {offset > 0 && (
+        <div className="transcript-progress previous-records" role="status">
+          <span>{formatNumber(offset)} daha eski kayıt var</span>
+          <button className="load-more-button" onClick={onLoadPrevious} disabled={loadingMore}>
+            {loadingMore ? "Önceki bölüm yükleniyor…" : `Önceki ${formatNumber(Math.min(PAGE_SIZE, offset))} kaydı yükle`}
+          </button>
+        </div>
+      )}
       <div className="turn-spine" ref={spineRef} style={{ height: virtualizer.getTotalSize() }}>
         {virtualizer.getVirtualItems().map((virtualRow) => {
           const turn = turns[virtualRow.index];
@@ -885,29 +962,28 @@ function Transcript({ session, mode, search, loading, hasMore, total, loadingMor
         })}
       </div>
       <div className="transcript-progress" ref={loadRef} role="status">
-        <span>{turns.length} / {total} kayıt hazır</span>
-        {hasMore && <small>{loadingMore ? "Sonraki bölüm yükleniyor…" : "Aşağı kaydırdıkça devamı otomatik gelir"}</small>}
+        <span>{total ? `${formatNumber(offset + 1)}–${formatNumber(offset + turns.length)} / ${formatNumber(total)} kayıt` : "Kayıt yok"}</span>
+        {hasMore && (
+          <button className="load-more-button" onClick={onLoadMore} disabled={loadingMore}>
+            {loadingMore ? "Sonraki bölüm yükleniyor…" : `Sonraki ${formatNumber(Math.min(PAGE_SIZE, total - offset - turns.length))} kaydı yükle`}
+          </button>
+        )}
       </div>
     </div>
   );
 }
 
 function TurnRecord({ turn, sessionId, projectPath }: { turn: Turn; sessionId: string; projectPath?: string }) {
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
-  const copyPrompt = async () => {
-    const copied = await copyToClipboard(cleanDisplayText(turn.text));
-    setCopyState(copied ? "copied" : "error");
-    window.setTimeout(() => setCopyState("idle"), 1400);
-  };
+  const copyTitle = turn.role === "user" ? "Promptu kopyala" : turn.role === "assistant" ? "Yanıtı kopyala" : "Kaydı kopyala";
   return (
     <article className={`turn-record ${turn.role}`}>
       <div className="turn-index" title={`Kaynak kayıt ${turn.ordinal + 1}`}>{turn.prompt_ordinal ? `T${String(turn.prompt_ordinal).padStart(3, "0")}` : "—"}</div>
       <div className="turn-sheet">
         <header>
           <strong>{roleLabel(turn.role)}</strong>
-          {turn.role === "user" && <button className={`turn-copy-button ${copyState}`} onClick={() => void copyPrompt()} aria-label={copyState === "copied" ? "Prompt kopyalandı" : "Promptu kopyala"} title="Promptu kopyala">{copyState === "copied" ? <Check size={12} /> : <Copy size={12} />}<span>{copyState === "copied" ? "Kopyalandı" : copyState === "error" ? "Kopyalanamadı" : "Kopyala"}</span></button>}
-          <span title={turn.created_at}>{formatTurnTimestamp(turn.created_at)}</span>
-          {turn.usage?.total_tokens && <span>{formatNumber(turn.usage.total_tokens)} tok.</span>}
+          <span className="turn-meta" title={turn.created_at}>{formatTurnTimestamp(turn.created_at)}</span>
+          {turn.usage?.total_tokens && <span className="turn-meta">{formatNumber(turn.usage.total_tokens)} tok.</span>}
+          {turn.text.trim() && <CopyAction className="turn-copy-button" value={cleanDisplayText(turn.text)} title={copyTitle} />}
         </header>
         {turn.text && <Suspense fallback={<div className="markdown-placeholder">Metin hazırlanıyor…</div>}><MarkdownBody source={turn.text} basePath={projectPath} /></Suspense>}
         {turn.tool_calls.map((tool, index) => (
@@ -922,7 +998,6 @@ function ToolRecord({ tool, sessionId, turnOrdinal, toolOrdinal, projectPath }: 
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<ToolCall>(tool);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
   const toggle = async () => {
     const next = !open;
     setOpen(next);
@@ -935,12 +1010,7 @@ function ToolRecord({ tool, sessionId, turnOrdinal, toolOrdinal, projectPath }: 
       setDetailLoading(false);
     }
   };
-  const copy = async () => {
-    const value = [detail.arguments_json, detail.result_text].filter(Boolean).join("\n\n");
-    const copied = await copyToClipboard(value);
-    setCopyState(copied ? "copied" : "error");
-    window.setTimeout(() => setCopyState("idle"), 1400);
-  };
+  const completeRecord = [detail.arguments_json, detail.result_text].filter(Boolean).join("\n\n");
   return (
     <div className="tool-record">
       <button className="tool-summary" onClick={() => void toggle()} aria-expanded={open}>
@@ -952,21 +1022,22 @@ function ToolRecord({ tool, sessionId, turnOrdinal, toolOrdinal, projectPath }: 
       </button>
       {open && (
         <div className="tool-detail">
-          <button className="copy-button" onClick={() => void copy()} aria-label={copyState === "copied" ? "Araç kaydı kopyalandı" : "Araç kaydını kopyala"}>
-            {copyState === "copied" ? <Check size={13} /> : <Copy size={13} />} {copyState === "copied" ? "Kopyalandı" : copyState === "error" ? "Kopyalanamadı" : "Kopyala"}
-          </button>
+          <div className="tool-detail-toolbar">
+            <span>Araç kaydı</span>
+            <CopyAction value={completeRecord} title="Tüm araç kaydını kopyala" label="Tümünü kopyala" />
+          </div>
           {detailLoading && <div className="tool-loading">Araç ayrıntısı yükleniyor…</div>}
           {detail.arguments_json && (
-            <div>
-              <label>Arguments</label>
+            <section className="tool-detail-section">
+              <header><label>Arguments</label><CopyAction value={detail.arguments_json} title="Araç argümanlarını kopyala" /></header>
               <pre><Suspense fallback={<code>{detail.arguments_json}</code>}><HighlightedJson source={detail.arguments_json} /></Suspense></pre>
-            </div>
+            </section>
           )}
           {detail.result_text && (
-            <div>
-              <label>Result</label>
+            <section className="tool-detail-section">
+              <header><label>Result</label><CopyAction value={detail.result_text} title="Araç sonucunu kopyala" /></header>
               <div className="tool-result"><Suspense fallback={<div className="markdown-placeholder">Sonuç hazırlanıyor…</div>}><MarkdownBody source={detail.result_text} basePath={projectPath} /></Suspense></div>
-            </div>
+            </section>
           )}
         </div>
       )}
@@ -1016,6 +1087,28 @@ function EvidencePanel({ cost, session, files, filesLoading, open, onClose, onNo
       <p className="cost-note">
         <AlertTriangle size={14} /> {cost.note}
       </p>
+      <div className="source-reference-section">
+        <div className="file-reference-heading">
+          <span>Yerel köken</span>
+          <small>salt okunur</small>
+        </div>
+        {session.source_path && (
+          <PathReference
+            icon={<Database size={14} />}
+            label="Oturum kaynak dosyası"
+            path={session.source_path}
+            onOpen={openFile}
+          />
+        )}
+        {session.project_path && (
+          <PathReference
+            icon={<Folder size={14} />}
+            label="Çalışma alanı"
+            path={session.project_path}
+            onOpen={openFile}
+          />
+        )}
+      </div>
       <div className="file-reference-section">
         <div className="file-reference-heading">
           <span>Etiketlenen dosyalar</span>
@@ -1042,6 +1135,19 @@ function EvidencePanel({ cost, session, files, filesLoading, open, onClose, onNo
         <span>Kaynak dosya değişmeden okundu</span>
       </div>
     </aside>
+  );
+}
+
+function PathReference({ icon, label, path, onOpen }: { icon: ReactNode; label: string; path: string; onOpen: (path: string) => Promise<void> }) {
+  return (
+    <div className="source-reference">
+      <button className="source-reference-open" onClick={() => void onOpen(path)} title={`${path} · klasörde göster`}>
+        {icon}
+        <span>{label}</span>
+        <small>{path}</small>
+      </button>
+      <CopyAction value={path} title={`${label} yolunu kopyala`} />
+    </div>
   );
 }
 
@@ -1091,21 +1197,4 @@ function formatDuration(value: number) {
 
 function safeFileName(value: string) {
   return value.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-").slice(0, 90) || "conversation";
-}
-
-async function copyToClipboard(value: string) {
-  try {
-    await navigator.clipboard.writeText(value);
-    return true;
-  } catch {
-    const field = document.createElement("textarea");
-    field.value = value;
-    field.style.position = "fixed";
-    field.style.opacity = "0";
-    document.body.appendChild(field);
-    field.select();
-    const copied = document.execCommand("copy");
-    field.remove();
-    return copied;
-  }
 }

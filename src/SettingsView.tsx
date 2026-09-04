@@ -3,7 +3,7 @@ import { CircleDollarSign, Plus, RotateCcw } from "lucide-react";
 import { defaultPrices, withUnknownModels } from "./prices";
 import type { PriceSetting, Provider, SessionListItem } from "./types";
 
-const labels: Record<Provider, string> = { codex: "Codex", claude: "Claude", grok: "Grok", antigravity: "Antigravity" };
+const labels: Record<Provider, string> = { codex: "Codex", claude: "Claude", grok: "Grok", antigravity: "AGY" };
 
 export function SettingsView({ prices, sessions, onChange }: { prices: PriceSetting[]; sessions: SessionListItem[]; onChange: (prices: PriceSetting[]) => void }) {
   const rows = useMemo(() => withUnknownModels(prices, sessions), [prices, sessions]);

@@ -396,7 +396,7 @@ impl Archive {
             "#,
             )
         };
-        sql.push_str(" WHERE EXISTS(SELECT 1 FROM turns visible WHERE visible.session_id=s.id AND visible.role IN ('user','assistant') AND trim(visible.text)<>'')");
+        sql.push_str(" WHERE EXISTS(SELECT 1 FROM turns visible WHERE visible.session_id=s.id AND visible.role IN ('user','assistant') AND trim(visible.text)<>'') AND (s.provider<>'codex' OR EXISTS(SELECT 1 FROM turns prompt WHERE prompt.session_id=s.id AND prompt.role='user' AND trim(prompt.text)<>''))");
         if has_search {
             if provider.is_some() {
                 sql.push_str(" AND s.provider=?3");
@@ -557,7 +557,7 @@ impl Archive {
 
     pub fn provider_counts(&self) -> rusqlite::Result<Vec<(String, i64)>> {
         let mut statement = self.connection.prepare(
-            "SELECT s.provider, COUNT(*) FROM sessions s WHERE EXISTS(SELECT 1 FROM turns t WHERE t.session_id=s.id AND t.role IN ('user','assistant') AND trim(t.text)<>'') GROUP BY s.provider ORDER BY s.provider",
+            "SELECT s.provider, COUNT(*) FROM sessions s WHERE EXISTS(SELECT 1 FROM turns t WHERE t.session_id=s.id AND t.role IN ('user','assistant') AND trim(t.text)<>'') AND (s.provider<>'codex' OR EXISTS(SELECT 1 FROM turns prompt WHERE prompt.session_id=s.id AND prompt.role='user' AND trim(prompt.text)<>'')) GROUP BY s.provider ORDER BY s.provider",
         )?;
         let result = statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -609,14 +609,14 @@ impl Archive {
         search: Option<&str>,
     ) -> rusqlite::Result<TurnPage> {
         let filter = match mode {
-            "conversation" => " AND t.role IN ('user','assistant')",
-            "prompts" => " AND t.role='user'",
-            "system" => " AND t.role='system'",
-            "responses" => " AND t.role='assistant'",
+            "conversation" => " AND t.role IN ('user','assistant') AND trim(t.text)<>''",
+            "prompts" => " AND t.role='user' AND trim(t.text)<>''",
+            "system" => " AND t.role='system' AND trim(t.text)<>''",
+            "responses" => " AND t.role='assistant' AND trim(t.text)<>''",
             "tools" => {
                 " AND (t.role='tool' OR EXISTS(SELECT 1 FROM tool_calls tc WHERE tc.turn_id=t.id))"
             }
-            "reasoning" => " AND t.role='reasoning'",
+            "reasoning" => " AND t.role='reasoning' AND trim(t.text)<>''",
             _ => " AND t.role!='reasoning'",
         };
         let has_search = search.is_some_and(|value| !value.trim().is_empty());
@@ -804,21 +804,10 @@ impl Archive {
         &self,
         session_id: &str,
     ) -> rusqlite::Result<Vec<FileReference>> {
+        // Source provenance and the workspace are shown in their own ledger.
+        // This list is intentionally limited to paths actually mentioned by a
+        // turn so they cannot be mistaken for chat attachments.
         let mut texts = Vec::new();
-        if let Some((source_path, project_path)) = self
-            .connection
-            .query_row(
-                "SELECT source_path, project_path FROM sessions WHERE id=?1",
-                [session_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-            )
-            .optional()?
-        {
-            texts.push(format!("@\"{source_path}\""));
-            if let Some(project_path) = project_path {
-                texts.push(format!("@\"{project_path}\""));
-            }
-        }
         let mut statement = self.connection.prepare(
             "SELECT text, metadata_json FROM turns WHERE session_id=?1 ORDER BY ordinal",
         )?;
@@ -1274,16 +1263,18 @@ fn extract_file_paths(text: &str) -> Vec<String> {
 
 fn extract_windows_paths(text: &str) -> Vec<String> {
     const EXTENSIONS: &[&str] = &[
-        "docx", "doc", "pdf", "md", "txt", "rtf", "xlsx", "xls", "csv", "pptx",
-        "ppt", "json", "jsonl", "toml", "yaml", "yml", "xml", "html", "css", "tsx",
-        "ts", "jsx", "js", "py", "rs", "png", "jpg", "jpeg", "gif", "webp", "svg",
-        "zip", "7z",
+        "docx", "doc", "pdf", "md", "txt", "rtf", "xlsx", "xls", "csv", "pptx", "ppt", "json",
+        "jsonl", "toml", "yaml", "yml", "xml", "html", "css", "tsx", "ts", "jsx", "js", "py", "rs",
+        "png", "jpg", "jpeg", "gif", "webp", "svg", "zip", "7z",
     ];
     let bytes = text.as_bytes();
     let mut found = Vec::new();
     let mut cursor = 0;
     while cursor + 2 < bytes.len() {
-        if !bytes[cursor].is_ascii_alphabetic() || bytes[cursor + 1] != b':' || bytes[cursor + 2] != b'\\' {
+        if !bytes[cursor].is_ascii_alphabetic()
+            || bytes[cursor + 1] != b':'
+            || bytes[cursor + 2] != b'\\'
+        {
             cursor += 1;
             continue;
         }
@@ -1293,7 +1284,8 @@ fn extract_windows_paths(text: &str) -> Vec<String> {
             continue;
         }
         let mut end = start + 3;
-        while end < bytes.len() && !matches!(bytes[end], b'\r' | b'\n' | b'"' | b'<' | b'>' | b'|') {
+        while end < bytes.len() && !matches!(bytes[end], b'\r' | b'\n' | b'"' | b'<' | b'>' | b'|')
+        {
             end += 1;
         }
         let candidate = &text[start..end];
@@ -1304,7 +1296,10 @@ fn extract_windows_paths(text: &str) -> Vec<String> {
             let mut search_from = 0;
             while let Some(index) = lower[search_from..].find(&needle) {
                 let candidate_end = search_from + index + needle.len();
-                let boundary = lower.as_bytes().get(candidate_end).is_none_or(|value| !value.is_ascii_alphanumeric());
+                let boundary = lower
+                    .as_bytes()
+                    .get(candidate_end)
+                    .is_none_or(|value| !value.is_ascii_alphanumeric());
                 if boundary && extension_end.is_none_or(|current| candidate_end < current) {
                     extension_end = Some(candidate_end);
                 }
@@ -1316,7 +1311,10 @@ fn extract_windows_paths(text: &str) -> Vec<String> {
         } else if let Some(relative_end) = candidate.find("  ") {
             end = start + relative_end;
         } else {
-            let leaf_has_space = candidate.rsplit('\\').next().is_some_and(|leaf| leaf.contains(char::is_whitespace));
+            let leaf_has_space = candidate
+                .rsplit('\\')
+                .next()
+                .is_some_and(|leaf| leaf.contains(char::is_whitespace));
             if leaf_has_space && !std::path::Path::new(candidate.trim()).exists() {
                 cursor = end;
                 continue;
@@ -1467,6 +1465,49 @@ mod tests {
     }
 
     #[test]
+    fn conversation_pages_count_messages_not_tool_only_envelopes() {
+        let mut archive = Archive::in_memory().unwrap();
+        let mut parsed = session();
+        parsed.turns.push(Turn {
+            external_id: Some("tool-envelope".into()),
+            ordinal: 1,
+            prompt_ordinal: None,
+            role: Role::Assistant,
+            created_at: None,
+            text: String::new(),
+            event_type: Some("assistant".into()),
+            model: None,
+            parent_external_id: None,
+            usage: None,
+            tool_calls: vec![ToolCall {
+                external_id: Some("call-1".into()),
+                name: "run_command".into(),
+                arguments_json: Some("{}".into()),
+                result_text: None,
+                status: Some("completed".into()),
+                duration_ms: None,
+            }],
+            metadata_json: None,
+        });
+        archive
+            .import_session(&parsed, "messages", 10, Some(1))
+            .unwrap();
+        let id = archive.list_sessions(None, None, 10).unwrap()[0].id.clone();
+        let conversation = archive
+            .load_turn_page(&id, "conversation", 0, 20, None)
+            .unwrap();
+        assert_eq!(conversation.total, 1);
+        assert_eq!(conversation.turns[0].role, Role::User);
+        assert_eq!(
+            archive
+                .load_turn_page(&id, "tools", 0, 20, None)
+                .unwrap()
+                .total,
+            1
+        );
+    }
+
+    #[test]
     fn claude_metadata_title_and_archive_survive_transcript_import() {
         let mut archive = Archive::in_memory().unwrap();
         let mut metadata = session();
@@ -1508,6 +1549,41 @@ mod tests {
     }
 
     #[test]
+    fn codex_worker_streams_without_a_user_prompt_stay_out_of_the_catalog() {
+        let mut archive = Archive::in_memory().unwrap();
+        let mut worker = session();
+        worker.title = None;
+        worker.turns[0].role = Role::Assistant;
+        worker.turns[0].text = "background worker output".into();
+        worker.turns[0].tool_calls.push(ToolCall {
+            external_id: None,
+            name: "read_file".into(),
+            arguments_json: None,
+            result_text: None,
+            status: Some("completed".into()),
+            duration_ms: None,
+        });
+        archive
+            .import_session(&worker, "worker", 10, Some(1))
+            .unwrap();
+        assert!(archive
+            .list_sessions(Some("codex"), None, 10)
+            .unwrap()
+            .is_empty());
+        assert!(archive.provider_counts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn provenance_paths_are_not_reported_as_chat_file_mentions() {
+        let mut archive = Archive::in_memory().unwrap();
+        let parsed = session();
+        let id = archive
+            .import_session(&parsed, "paths", 10, Some(1))
+            .unwrap();
+        assert!(archive.session_file_references(&id).unwrap().is_empty());
+    }
+
+    #[test]
     fn file_path_extraction_ignores_arbitrary_json_strings() {
         let paths = extract_file_paths(
             r#"{"path":"E:\\trace analysis\\workflow.md","prompt":"C:\\Users\\ismai\\Documents is not a file reference"}"#,
@@ -1520,10 +1596,13 @@ mod tests {
         let paths = extract_file_paths(
             "@C:\\Users\\ismai\\Downloads\\JRFID\\JRFID_Article.docx and @C:\\Users\\ismai\\Downloads\\JRFID\\High Gain Suspended Patch Antenna Element with Contactless Capacitive Coupling Feed.docx\nE:\\trace analysis\\TRACE_ANALYSIS_MASTER_WORKFLOW    burada",
         );
-        assert_eq!(paths, vec![
-            r"C:\Users\ismai\Downloads\JRFID\JRFID_Article.docx",
-            r"C:\Users\ismai\Downloads\JRFID\High Gain Suspended Patch Antenna Element with Contactless Capacitive Coupling Feed.docx",
-            r"E:\trace analysis\TRACE_ANALYSIS_MASTER_WORKFLOW",
-        ]);
+        assert_eq!(
+            paths,
+            vec![
+                r"C:\Users\ismai\Downloads\JRFID\JRFID_Article.docx",
+                r"C:\Users\ismai\Downloads\JRFID\High Gain Suspended Patch Antenna Element with Contactless Capacitive Coupling Feed.docx",
+                r"E:\trace analysis\TRACE_ANALYSIS_MASTER_WORKFLOW",
+            ]
+        );
     }
 }

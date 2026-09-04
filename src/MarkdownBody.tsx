@@ -1,4 +1,4 @@
-import { memo, useMemo, useState, type ReactNode } from "react";
+import { Children, isValidElement, memo, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -16,6 +16,7 @@ import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import { FileImage, ImageOff } from "lucide-react";
 import { revealPath } from "./bridge";
+import { CopyAction } from "./CopyAction";
 import { cleanDisplayText } from "./text";
 
 hljs.registerLanguage("json", json);
@@ -51,6 +52,7 @@ export const MarkdownBody = memo(function MarkdownBody({ source, basePath }: { s
         skipHtml
         components={{
           img: ({ src, alt }) => <SafeImage src={src} alt={alt} basePath={basePath} />,
+          pre: ({ children }) => <CopyableCodeBlock>{children}</CopyableCodeBlock>,
           a: ({ href, children }) => isLocalReference(href) || href?.startsWith("#local-file=")
             ? <LocalFileLink href={href || ""} basePath={basePath}>{children}</LocalFileLink>
             : <a href={href} target="_blank" rel="noreferrer">{children}</a>,
@@ -66,6 +68,29 @@ export const MarkdownBody = memo(function MarkdownBody({ source, basePath }: { s
     </div>
   );
 });
+
+function CopyableCodeBlock({ children }: { children: ReactNode }) {
+  const first = Children.toArray(children)[0];
+  const className = isValidElement<{ className?: string }>(first) ? first.props.className || "" : "";
+  const language = /language-([^\s]+)/.exec(className)?.[1];
+  const value = textContent(children).replace(/\n$/, "");
+  return (
+    <div className="code-block-shell">
+      <div className="code-block-toolbar">
+        <span>{language || "Kod"}</span>
+        <CopyAction value={value} title="Kod bloğunu kopyala" />
+      </div>
+      <pre>{children}</pre>
+    </div>
+  );
+}
+
+function textContent(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textContent).join("");
+  if (isValidElement<{ children?: ReactNode }>(node)) return textContent(node.props.children);
+  return "";
+}
 
 function LocalFileLink({ href, basePath, children }: { href: string; basePath?: string; children: ReactNode }) {
   const [missing, setMissing] = useState(false);

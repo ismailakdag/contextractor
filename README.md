@@ -10,7 +10,7 @@ Contextractor, masaüstü AI araçlarının yerelde bıraktığı oturum kayıtl
 | Claude Code | `~/.claude/projects/**/*.jsonl` | Subagent günlükleri ana konuşmadan ayrı içe alınmaz |
 | Claude Desktop | Uygulamanın `claude-code-sessions` metadata köprüsü | Yalnızca yereldeki Claude Code kaydına bağlanabilen içerik |
 | Grok CLI | `~/.grok/sessions/**/chat_history.jsonl` | grok.com tüketici sohbetleri buluttadır; tarayıcı kimlik bilgileri okunmaz |
-| Antigravity / AGY | `~/.gemini/antigravity/brain/**/transcript_full.jsonl` | Planner cevapları ve araç olayları dahil |
+| Antigravity / AGY | `~/.gemini/{antigravity,antigravity-cli}/brain/**/transcript_full.jsonl` | IDE ve AGY CLI planner cevapları ile araç olayları dahil |
 
 Uygulama açılışta keşif ve artımlı tarama yapar. Sonraki taramalarda dosya parmak izi değişmeyen kayıtlar tekrar parse edilmez.
 
@@ -19,12 +19,13 @@ Uygulama açılışta keşif ve artımlı tarama yapar. Sonraki taramalarda dosy
 - Sağlayıcı, proje ve tarih bağlamıyla birleşik oturum kataloğu
 - Prompt, cevap ve araç çağrılarında indeksli tam metin arama
 - Tüm akış, yalnız promptlar, system promptları, cevaplar, araç çağrıları ve özet görünümleri
-- Konuşma içindeki Markdown'ı güvenli biçimde render etme; kod bloklarında ve araç JSON'larında syntax highlighting
+- Konuşma içindeki Markdown'ı güvenli biçimde render etme; kod bloklarında ve araç JSON'larında syntax highlighting ve blok bazlı kopyalama
+- Her oturumun gerçek kaynak dosyasını, çalışma alanını ve konuşmada geçen mutlak dosya referanslarını ayrı ayrı gösterme
 - Markdown, JSON, JSONL, kullanıcı promptları, system promptları, birleşik context, cevaplar, araç çağrıları ve özet dışa aktarma
 - Sağlayıcı bazında oturum, prompt, araç, token, ortalama kullanım ve en yoğun gün analizi
 - Kaydedilmiş token sayaçları; yoksa açıkça **tahmini** olarak işaretlenen yaklaşık sayaçlar
 - Tarihli API fiyat kataloğuyla “API'de olsaydı” maliyet karşılığı; bilinmeyen modeller için kullanıcı tarafından düzenlenebilir oranlar
-- Büyük JSONL kayıtlarını belleğe bütünüyle almayan streaming parser ve sayfalı transcript
+- Büyük JSONL kayıtlarını belleğe bütünüyle almayan streaming parser; en güncel mesajdan açılan, ileri/geri sayfalı transcript
 - Arka planda çalışan arama/okuma komutları, toplu SQL sorguları ve büyük Claude oturumlarında sabit boyutlu ilk yükleme
 - İnternet, telemetry veya gizli browser credential erişimi yok
 

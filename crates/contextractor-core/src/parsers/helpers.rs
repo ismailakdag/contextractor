@@ -189,7 +189,11 @@ pub fn usage_from(value: &Value, source: &str) -> Option<TokenUsage> {
     );
     let cache_write = find_i64(
         value,
-        &["cache_creation_input_tokens", "cache_write_input_tokens", "cacheWriteInputTokens"],
+        &[
+            "cache_creation_input_tokens",
+            "cache_write_input_tokens",
+            "cacheWriteInputTokens",
+        ],
     );
     let reasoning = find_i64(
         value,

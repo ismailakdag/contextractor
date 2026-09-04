@@ -230,22 +230,30 @@ fn discover_grok(home: &Path) -> ProviderDiscovery {
 }
 
 fn discover_antigravity(home: &Path) -> ProviderDiscovery {
-    let brain = home.join("antigravity/brain");
+    let brains = [
+        home.join("antigravity").join("brain"),
+        home.join("antigravity-cli").join("brain"),
+    ];
+    let mut roots = Vec::new();
     let mut candidates = Vec::new();
-    if brain.is_dir() {
-        collect_named_jsonl(
-            &brain,
-            |name| name == "transcript_full.jsonl",
-            Provider::Antigravity,
-            SourceKind::AntigravityTranscript,
-            false,
-            &mut candidates,
-        );
+    for brain in brains {
+        if brain.is_dir() {
+            roots.push(brain.clone());
+            collect_named_jsonl(
+                &brain,
+                |name| name == "transcript_full.jsonl",
+                Provider::Antigravity,
+                SourceKind::AntigravityTranscript,
+                false,
+                &mut candidates,
+            );
+        }
     }
+    deduplicate_candidates(&mut candidates);
     ProviderDiscovery {
         provider: Provider::Antigravity,
-        installed: home.join("antigravity").exists(),
-        roots: brain.is_dir().then_some(brain).into_iter().collect(),
+        installed: home.join("antigravity").exists() || home.join("antigravity-cli").exists(),
+        roots,
         candidates,
         warnings: Vec::new(),
     }
@@ -316,20 +324,30 @@ mod tests {
         let claude = home.join(".claude/projects/demo");
         let grok = home.join(".grok/sessions/demo/session");
         let agy = home.join(".gemini/antigravity/brain/demo/.system_generated/logs");
+        let agy_cli = home.join(".gemini/antigravity-cli/brain/cli-demo/.system_generated/logs");
         fs::create_dir_all(&codex).unwrap();
         fs::create_dir_all(&claude).unwrap();
         fs::create_dir_all(&grok).unwrap();
         fs::create_dir_all(&agy).unwrap();
+        fs::create_dir_all(&agy_cli).unwrap();
         fs::write(codex.join("rollout-test.jsonl"), "{}\n").unwrap();
         fs::write(claude.join("session.jsonl"), "{}\n").unwrap();
         fs::write(grok.join("chat_history.jsonl"), "{}\n").unwrap();
         fs::write(agy.join("transcript_full.jsonl"), "{}\n").unwrap();
+        fs::write(agy_cli.join("transcript_full.jsonl"), "{}\n").unwrap();
 
         let report = discover(&DiscoveryOptions {
             home_dir: Some(home.to_path_buf()),
             roaming_dir: None,
             include_desktop_metadata: false,
         });
-        assert_eq!(report.total_candidates(), 4);
+        assert_eq!(report.total_candidates(), 5);
+        let antigravity = report
+            .providers
+            .iter()
+            .find(|provider| provider.provider == Provider::Antigravity)
+            .unwrap();
+        assert_eq!(antigravity.roots.len(), 2);
+        assert_eq!(antigravity.candidates.len(), 2);
     }
 }

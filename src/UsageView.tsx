@@ -4,7 +4,7 @@ import { getUsageAnalytics, getUsageCosts } from "./bridge";
 import { applyPriceOverride } from "./prices";
 import type { PriceSetting, Provider, SessionListItem, UsageAnalytics, UsageCostRow } from "./types";
 
-const labels: Record<Provider, string> = { codex: "Codex", claude: "Claude", grok: "Grok", antigravity: "Antigravity" };
+const labels: Record<Provider, string> = { codex: "Codex", claude: "Claude", grok: "Grok", antigravity: "AGY" };
 const providerOrder: Provider[] = ["codex", "claude", "grok", "antigravity"];
 type Range = "all" | "30" | "90";
 interface DayRow { date: string; prompts: number; responses: number; tools: number; sessions: number; tokens: number }
